@@ -1,0 +1,16 @@
+[
+  {
+    "type": "pk_duplicate",
+    "table": "claim_element",
+    "dup_ids": 330,
+    "dup_rows": 342,
+    "dup_ids_with_differing_content": 234
+  },
+  {
+    "type": "pk_duplicate",
+    "table": "paragraph",
+    "dup_ids": 29,
+    "dup_rows": 42,
+    "dup_ids_with_differing_content": 29
+  }
+]

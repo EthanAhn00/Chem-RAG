@@ -1,0 +1,47 @@
+{
+  "generated_at": "2026-09-07T12:39:01+00:00",
+  "relevant_categories": [
+    "X",
+    "Y"
+  ],
+  "grade_map": {
+    "X": 2,
+    "Y": 1
+  },
+  "sources": {
+    "examiner_citation": {
+      "input_rows": 1254,
+      "kept": 1254
+    },
+    "in_corpus_candidate_pairs": {
+      "path": "/sessions/rcw-01bsb9tbstnqranena22m1rp/mnt/Project/epo_dataset/in_corpus_candidate_pairs.csv",
+      "input_rows": 1439,
+      "kept": 463,
+      "dropped_by_category": {
+        "A,P": 86,
+        "E": 36,
+        "A": 784,
+        "A,D": 53,
+        "T": 10,
+        "L": 3,
+        "A,D,P": 2,
+        "E,D": 2
+      }
+    }
+  },
+  "total_pairs": 1717,
+  "unique_queries": 1483,
+  "unique_cited": 1410,
+  "grade_distribution": {
+    "X(2)": 1308,
+    "Y(1)": 409
+  },
+  "validation": {
+    "out_of_corpus": 0,
+    "time_violation": 0,
+    "family_violation": 0,
+    "missing_date": 0,
+    "duplicate_pairs": 0,
+    "passed": true
+  }
+}

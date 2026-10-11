@@ -1,0 +1,46 @@
+{
+  "case_relevance.csv": {
+    "sha256": "a6dac01c73fa3dc9a82649f5e705c3c6df8a714343dcd4d1b5b57ebf69e628ad",
+    "bytes": 41
+  },
+  "claim_element.csv": {
+    "sha256": "a84deedb4d524eccbc6e7e539bf3bc4b70ba1ed74af460173a580abc44a0323a",
+    "bytes": 19255436
+  },
+  "exam_case.csv": {
+    "sha256": "570f27b67d7d0f62acec372cbcf898d08bd09cdbe137e0ea3aab0cc3e6ea816b",
+    "bytes": 97
+  },
+  "examiner_citation.csv": {
+    "sha256": "78d0d5fbffcdbab911e51ef3dab41729cc2add5362189ad9316ef5e218a08fcd",
+    "bytes": 62740
+  },
+  "figure.csv": {
+    "sha256": "16f4b3c9c7c5d9db4fd06d472edb44b1eaa0f9603f43474b165593c7c6ec6847",
+    "bytes": 2554140
+  },
+  "grounding_gold.csv": {
+    "sha256": "7341a89f99dd6ccc255237861988eefab5e3fb29c402f3307304f482747362ad",
+    "bytes": 406332
+  },
+  "molecule.csv": {
+    "sha256": "c6d6ada137fd8b1b5a0e0e1bdd79e7d2d316a0d2829d49855beb89d4288ad6a9",
+    "bytes": 461030
+  },
+  "paragraph.csv": {
+    "sha256": "3c23e5a2f5621e486cd857d114561e80726c06466490e405a6d08b50f7bdcf55",
+    "bytes": 221057188
+  },
+  "patent_content.csv": {
+    "sha256": "1ff988d1023b111c2e3fd685fc760577eacfd58e18a1a47482a9e6d73318551c",
+    "bytes": 22374366
+  },
+  "patent_molecule.csv": {
+    "sha256": "1dfbbdf358d0855c3504bb8124d0f7e0cf2b0eca55d39b7dada121f19028895f",
+    "bytes": 254108
+  },
+  "split.csv": {
+    "sha256": "76a37f0114083b942514e6a650a7825b3fc575c28b668b1195908370a2711949",
+    "bytes": 124932
+  }
+}

@@ -1,0 +1,10 @@
+# 선택: dense 임베딩 백엔드별 추가 의존성
+#
+# 기본 백엔드(static-vectors)는 numpy만 있으면 동작한다.
+#   scripts/qdrant_fetch_dense_model.py 가 GitHub 릴리스에서 GloVe 벡터를 받아
+#   data/embeddings_cache/*.npz 로 변환한다. 추가 패키지가 필요 없다.
+#
+# transformer 문장 인코더를 쓰려면(HuggingFace 접근이 가능한 환경에서만):
+#   CHEMRAG_DENSE_BACKEND=fastembed 또는 sentence-transformers
+# fastembed==0.7.1
+# sentence-transformers==3.4.1

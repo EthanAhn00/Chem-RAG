@@ -1,0 +1,8 @@
+# 코어 파이프라인
+numpy==2.5.1
+pillow==12.3.0
+rdkit==2026.3.5
+
+# Qdrant 벡터 검색 (qdrant_engine/, scripts/qdrant_*.py)
+# 아래 버전으로 실제 적재/검색/평가를 검증했다.
+qdrant-client==1.19.0

@@ -1,0 +1,63 @@
+{
+  "source_version": "92aa07b0b8bc052b",
+  "source_files": {
+    "claim_element.csv": "a84deedb4d52",
+    "figure.csv": "16f4b3c9c7c5",
+    "molecule.csv": "c6d6ada137fd",
+    "patent_content.csv": "1ff988d1023b",
+    "patent_molecule.csv": "1dfbbdf358d0"
+  },
+  "patent_molecule_rows_input": 9772,
+  "duplicate_pair_rows_removed": 2844,
+  "unique_patent_molecule_pairs": 6928,
+  "unique_patents": 100,
+  "unique_molecules": 4718,
+  "molecules_with_unparseable_smiles": 20,
+  "in_claim": {
+    "unknown": 6928
+  },
+  "in_figure": {
+    "unknown": 6928
+  },
+  "location_status": {
+    "unknown_text_scanned_no_verified_match": 6908,
+    "unknown_molecule_smiles_unparseable": 20
+  },
+  "figure_exist": {
+    "unknown": 5804,
+    "true": 1124
+  },
+  "db_occurrence_count": {
+    "2": 874,
+    "3": 985,
+    "1": 5069
+  },
+  "claim_occurrence_status": {
+    "unverifiable_no_claim_structure_annotation": 6928
+  },
+  "claim_occurrence_count_known": 0,
+  "claim_occurrence_count_null": 6928,
+  "claim_count_with_structure_known": 0,
+  "records_with_unverified_figure_evidence": 0,
+  "evidence_sources_scanned": {
+    "ocsr_cache": {
+      "files": 29,
+      "success": 13,
+      "not_found": 16,
+      "unparseable_smiles": 0
+    },
+    "patcid_epo": {
+      "skipped": true
+    },
+    "claim_element_smiles": "claim_element.csv 전수 스캔",
+    "figure_ocsr_smiles": "figure.csv 전수 스캔",
+    "patent_molecule_location": "patent_molecule.csv 전수 스캔",
+    "claims_text_extraction": "patent_content.claims_text 전수 스캔(InChIKey/SMILES)"
+  },
+  "evidence_source_availability": {
+    "patents_with_claim_element_smiles_annotation": 0,
+    "patents_with_figure_ocsr_annotation": 0,
+    "patent_molecule_rows_with_location": 0,
+    "patent_molecule_rows_with_unit_ref": 0
+  }
+}

@@ -1,0 +1,51 @@
+# Python, local environments, editors, and secrets
+__pycache__/
+*.py[cod]
+.venv*/
+.env
+.env.*
+!.env.example
+.DS_Store
+._*
+.AppleDouble/
+.LSOverride
+*.pem
+*.key
+*.p12
+*.pfx
+.idea/
+*.log
+
+# Third-party raw inputs and downloaded/generated caches
+data/external/
+data/patcid_surechembl_db/
+data/crops/
+data/fetched_drawings/
+data/ocsr_cache/
+data/embeddings_cache/
+data/epo_txt/
+data/epo_srpt_label/
+data/db_export/ops_cache/
+data/db_export/paragraph.csv
+data/processed/sr_pair_labeled.jsonl
+
+# Local vector stores and experiment outputs
+data/qdrant_local/
+data/qdrant_storage*/
+data/qdrant_text_units/
+data/qdrant_patent_baseline/
+data/qdrant_snapshot/
+data/qdrant/runs/
+qdrant_storage/
+.qdrant-initialized
+benchmark/results/
+structure_retrieval_outputs/
+analysis/
+embedding_token_limit_summary.csv
+
+# Regenerable legacy baseline derivatives
+data/db_export/derived/*
+!data/db_export/derived/original_csv_checksums.json
+!data/db_export/derived/gold_xy_v1.csv
+!data/db_export/derived/gold_xy_v1_summary.json
+!data/db_export/derived/structure_location_coverage.json

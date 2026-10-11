@@ -1,0 +1,14 @@
+{
+  "total_records": 2591,
+  "resolved_with_year": 2541,
+  "unresolved": 50,
+  "cutoff_year": 2023,
+  "target_test_fraction": 0.2,
+  "actual_counts": {
+    "train": 2140,
+    "test": 401,
+    "train_unresolved": 50
+  },
+  "actual_test_fraction_of_resolved": 0.1578,
+  "note": "train_unresolved = records without a recovered patent number/year; kept out of test because leakage cannot be verified for them. test = connected component (by shared target/prior patent number) whose earliest known appearance is >= cutoff_year."
+}

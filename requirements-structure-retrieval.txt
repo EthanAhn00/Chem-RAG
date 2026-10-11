@@ -1,0 +1,9 @@
+# Direct structure/fusion dependencies; not a historical environment lockfile.
+# Install platform-appropriate PyTorch separately for MoLFormer/text vector reads.
+duckdb==1.5.5
+qdrant-client==1.19.0
+rdkit==2025.9.5
+transformers==5.12.1
+huggingface_hub
+numpy
+scikit-learn
