@@ -6,6 +6,7 @@ Run from the repository root. Start with the
 | Directory | Scope |
 |---|---|
 | `structure_retrieval/` | Retrieval, frozen evaluation/fusion, comparison, final validation |
+| [rag/](rag/README.md) | Downstream cited-document judgment, RAG, BM25, and result evaluation |
 | `db_export/` | Retrieval ground-truth construction and legacy CSV preparation/validation |
 | `qdrant/` | Text-unit embedding construction and separate patent-level baseline tooling |
 | `evaluation/` | Earlier text-unit evaluator and legacy corpus/Qdrant evaluation |
@@ -50,3 +51,12 @@ inputs without preparing a separate working copy.
 For legacy baseline/export/OCSR details, see `qdrant_engine/README.md`,
 `data/db_export/README.md`, and `vision_ocsr/README.md` at the repository root.
 These auxiliary workflows do not replace the frozen paper archive.
+
+## Downstream RAG
+
+The integrated RAG code is isolated in `scripts/rag/` and uses package-relative
+imports. Run its entry points from the repository root as
+`python -m scripts.rag.<module>`, not as standalone files. It consumes existing
+rankings and a read-only text-unit SQLite store; it does not rebuild T1–T3.
+Required inputs, output/cache paths, and metric differences are documented in
+[rag/README.md](rag/README.md). Result logs were not included with the source.

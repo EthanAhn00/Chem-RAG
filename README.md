@@ -3,6 +3,8 @@
 This repository implements patent-data preparation, text/structure retrieval, and
 text–structure fusion. The paper-facing experiment is the frozen T1/T2/T3
 five-fold evaluation in [scripts/structure_retrieval](scripts/structure_retrieval/README.md).
+Downstream citation judgment and retrieval-augmented judgment are implemented
+separately in [scripts/rag](scripts/rag/README.md).
 
 **Release status:** the frozen experiment bundle, text-unit vector databases, and
 `data/epo_txt/` are not included in this source copy. This is not a self-contained
@@ -30,6 +32,7 @@ fusion fitting, not embedding-model fine-tuning.
 | Directory | Purpose |
 |---|---|
 | [scripts/structure_retrieval](scripts/structure_retrieval/README.md) | Retrieval, frozen folds, fusion, comparison, reproducibility checks |
+| [scripts/rag](scripts/rag/README.md) | Downstream judgment, RAG, BM25, and result-log evaluation |
 | [scripts](scripts/README.md) | Preparation and auxiliary/legacy CLIs |
 | [data/db_export](data/db_export/README.md) | Legacy relational CSV export, not the final ranking bundle |
 | [data_parser](data_parser/README.md) | Search-report, patent XML, and full-text parsing |
@@ -41,8 +44,10 @@ fusion fitting, not embedding-model fine-tuning.
 | [config](config/README.md) | Legacy configuration |
 | `tests/` | Legacy baseline unit and Qdrant integration tests |
 
-`rag_engine/` does not provide a downstream LLM judgement/generation evaluator.
-Retrieval results must not be described as end-to-end generator results.
+`rag_engine/` remains a legacy retrieval package; the downstream LLM evaluator
+is in `scripts/rag/`. Its result logs and required text database were not supplied
+with the integrated source. Retrieval results are not end-to-end generator
+results, and source integration does not validate downstream experimental scores.
 
 ## Environment
 
@@ -71,8 +76,9 @@ CSVs are present but insufficient alone. An archive omitting full
 
 External SureChEMBL/PatCID dumps, downloaded images, internal diagnostics, legacy
 result caches, and inherited Git history are excluded from this submission copy.
-Obtain external assets under their own terms. The Apache-2.0 `LICENSE` applies to
-the code; it does not grant rights to external data/model weights. Redistribution
+Obtain external assets under their own terms. See the repository `LICENSE`;
+external data/model weights are separate assets. The contributed RAG folder
+did not contain a separate license or redistribution statement. Redistribution
 permission for included research data must be checked before publication. No
 data licence or public data-download location is asserted here.
 

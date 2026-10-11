@@ -1,0 +1,7 @@
+numpy
+openai>=1.30
+requests
+tqdm
+rank_bm25
+# Inference serving is a separate environment, not installed by this file.
+# Endpoint/model compatibility must be verified on the intended server.

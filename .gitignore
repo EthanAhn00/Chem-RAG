@@ -41,6 +41,10 @@ qdrant_storage/
 benchmark/results/
 structure_retrieval_outputs/
 analysis/
+# Compatibility locations for local downstream RAG artifacts
+scripts/rag/.cache/
+scripts/rag/results/
+scripts/rag/bm25_rankings*.jsonl
 embedding_token_limit_summary.csv
 
 # Regenerable legacy baseline derivatives

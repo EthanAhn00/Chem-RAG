@@ -14,3 +14,7 @@ Legacy default weights are 0.5/0.3/0.2 in `config/settings.py`, not the tuned
 M1–M4 settings. `scripts/evaluation/evaluate_full_corpus_retrieval.py` is a separate
 legacy evaluator. See `scripts/structure_retrieval/README.md` for the frozen
 experiment; different candidate pools and ground-truth tracks are not interchangeable.
+
+The separate downstream LLM judgment/RAG implementation is now in
+[scripts/rag](../scripts/rag/README.md). This legacy package and its scoring
+defaults are unchanged by that integration.
