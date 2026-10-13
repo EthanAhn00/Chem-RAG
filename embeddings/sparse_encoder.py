@@ -1,16 +1,10 @@
-"""BM25 sparse 인코더.
-
-Qdrant의 IDF modifier에 의존하지 않고 BM25를 클라이언트에서 직접 계산한다.
-이유: (1) 로컬/서버 모드에서 통계가 달라지지 않게 하고, (2) 점수 산출식을
-코드에 명시해 재현 가능하게 하기 위해서다.
-
-분해 방식(내적이 곧 BM25 점수가 되도록):
-    문서 벡터 값 = tf * (k1 + 1) / (tf + k1 * (1 - b + b * dl / avgdl))
-    질의 벡터 값 = idf(term)   (Lucene식 smoothed idf)
-    score = sum_over_matched_terms(doc_value * query_value) = BM25
-
-토크나이저는 프로젝트 기존 rag_engine.ChemicalTokenizer를 그대로 쓴다
-(기존 Jaccard baseline과 어휘 처리 기준을 맞추기 위함).
+"""BM25 sparse encoder.
+Compute BM25 on the client rather than using Qdrant's IDF modifier, keeping local/server statistics consistent and the scoring formula explicit and reproducible.
+Factorization for BM25 by dot product:
+document value = tf * (k1 + 1) / (tf + k1 * (1 - b + b * dl / avgdl))
+query value = idf(term), using Lucene-style smoothed IDF
+score = sum_over_matched_terms(doc_value * query_value) = BM25.
+Reuse rag_engine.ChemicalTokenizer for lexical consistency with the Jaccard baseline.
 """
 import json
 import math
@@ -39,10 +33,7 @@ class BM25SparseEncoder(SparseEncoder):
 
     # ------------------------------------------------------------------ fit
     def fit(self, texts, token_lists=None):
-        """코퍼스 전체로 문서빈도/평균 길이를 학습한다.
-
-        token_lists를 주면 재토큰화하지 않는다(대량 색인 시 토큰화 중복 제거용).
-        """
+        """Fit document frequencies and average length on the corpus. Supplied token_lists avoid duplicate tokenization during bulk indexing."""
         df = {}
         total_len = 0
         n = 0
@@ -56,7 +47,7 @@ class BM25SparseEncoder(SparseEncoder):
         self.num_docs = n
         self.avgdl = (total_len / n) if n else 0.0
         self.vocab = {term: i for i, term in enumerate(sorted(df))}
-        # Lucene식 smoothed IDF - 항상 양수
+        # Lucene-style smoothed IDF is always positive.
         self.idf = {t: math.log(1.0 + (n - c + 0.5) / (c + 0.5)) for t, c in df.items()}
         self.fitted = True
         return self
@@ -64,7 +55,7 @@ class BM25SparseEncoder(SparseEncoder):
     # ------------------------------------------------------------- encoding
     def encode_documents(self, texts, token_lists=None):
         if not self.fitted:
-            raise RuntimeError('BM25SparseEncoder.fit()을 먼저 호출해야 합니다')
+            raise RuntimeError('Call BM25SparseEncoder.fit() first')
         out = []
         for i, text in enumerate(texts):
             tokens = token_lists[i] if token_lists is not None else self.tokenizer.tokenize(text or '')
@@ -87,7 +78,7 @@ class BM25SparseEncoder(SparseEncoder):
 
     def encode_query(self, text):
         if not self.fitted:
-            raise RuntimeError('BM25SparseEncoder.fit()을 먼저 호출해야 합니다')
+            raise RuntimeError('Call BM25SparseEncoder.fit() first')
         tokens = self.tokenizer.tokenize(text or '')
         seen = {}
         for t in tokens:
@@ -100,7 +91,7 @@ class BM25SparseEncoder(SparseEncoder):
         indices = sorted(seen)
         return indices, [seen[i] for i in indices]
 
-    # ------------------------------------------------------------ 저장/복원
+    # ------------------------------------------------------------ Save/restore
     def save(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w', encoding='utf-8') as f:

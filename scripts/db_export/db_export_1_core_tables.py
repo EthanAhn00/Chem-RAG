@@ -1,18 +1,7 @@
-"""
-11개 테이블 DB 스키마 중 Task 1(선행기술 검색)에 필요한 5개 테이블
-(PatentContent, Molecule, PatentMolecule, ExaminerCitation, Split)을 채우고, 나머지
-Task 2/3용 6개 테이블은 빈 스키마(헤더만)로 만든다. 새 계산 로직은 없고 파이프라인이
-이미 만들어둔 값을 스키마 모양으로 옮기기만 함.
-
-이어서 실행할 스크립트:
-  db_export_2_fill_citation_category.py - examiner_citation의 category(X/Y/A) 채움
-  db_export_3_task2_tables.py           - paragraph/figure/claim_element/grounding_gold 채움
-
-사용법 (맥 .venv):
-    python3 run_chem_rag.py                    # data/reference/epo_section_c_benchmark_dataset.json 최신화
-    python3 scripts/db_export/db_export_1_core_tables.py
-
-출력: data/db_export/ 아래 11개 테이블 CSV + coverage_report.json(테이블별 행 수/빈 열 요약)
+"""Populate 5 Task 1 tables from the 11-table DB schema: PatentContent, Molecule, PatentMolecule, ExaminerCitation, Split. Create header-only schemas for the other 6 Task 2/3 tables. Transfer existing pipeline values without new scoring logic.
+Next: db_export_2_fill_citation_category.py fills citation categories; db_export_3_task2_tables.py fills paragraph/figure/claim_element/grounding_gold.
+Usage: python3 run_chem_rag.py to refresh data/reference/epo_section_c_benchmark_dataset.json, then python3 scripts/db_export/db_export_1_core_tables.py.
+Write 11 CSV tables and coverage_report.json under data/db_export/, summarizing rows and empty fields.
 """
 import os
 import sys
@@ -26,7 +15,7 @@ from config.settings import DATA_DIR
 def load_dataset():
     path = os.path.join(DATA_DIR, 'reference', 'epo_section_c_benchmark_dataset.json')
     if not os.path.exists(path):
-        print(f'[FAIL] {path} 가 없습니다. 먼저 python3 run_chem_rag.py 를 실행해주세요.')
+        print(f'[FAIL] {path} is missing. Run python3 run_chem_rag.py first.')
         sys.exit(1)
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
@@ -55,8 +44,8 @@ def write_csv(out_dir, name, fieldnames, rows):
 
 
 def build_patent_content(records):
-    # 같은 특허가 어떤 레코드에서는 target, 다른 레코드에서는 prior로 등장할 수 있어
-    # patent_id 단위로 병합
+    # The same patent may appear as target in one record and prior in another;
+    # merge by patent_id.
     patents = {}
 
     def touch(pid, claim_text, ipc, has_structure):
@@ -64,13 +53,13 @@ def build_patent_content(records):
             return
         p = patents.setdefault(pid, {
             'patent_id': pid,
-            'pub_date': None,          # OPS /biblio 연동 필요(미착수)
-            'app_date': None,          # 위와 동일
-            'family_id': None,         # 위와 동일
+            'pub_date': None,          # Requires OPS /biblio integration (not yet implemented here).
+            'app_date': None,          # Same as above.
+            'family_id': None,         # Same as above.
             'ipc_codes': set(),
-            'title': None,             # OPS /biblio 연동 필요(미착수)
+            'title': None,             # Requires OPS /biblio integration (not yet implemented here).
             'claims_text': None,
-            'description_text': None,  # 원본 명세서 전문 없음
+            'description_text': None,  # Original full specification text is unavailable.
             'has_structure': False,
         })
         for tok in str(ipc or '').replace(',', '|').split('|'):
@@ -98,7 +87,7 @@ def build_patent_content(records):
 
 
 def build_molecule_and_patent_molecule(records):
-    # SMILES 문자열을 mol_id 대신 dedup 키로 씀 - 순번 id는 여기서 새로 채번
+    # Deduplicate by SMILES rather than mol_id; assign sequential IDs here.
     molecules = {}
     patent_molecule_rows = []
 
@@ -112,13 +101,13 @@ def build_molecule_and_patent_molecule(records):
                 'mol_id': f'MOL_{len(molecules) + 1:06d}',
                 'smiles': smi,
                 'inchikey': chem_meta.get('inchikey'),
-                'morgan_fp': None,  # 사전계산 안 됨(미착수)
+                'morgan_fp': None,  # Not precomputed (not yet implemented).
                 'source': chem_meta.get('status', 'UNKNOWN'),
             })
             patent_molecule_rows.append({
                 'patent_id': patent_id,
                 'mol_id': mol['mol_id'],
-                'location': None,  # 특허 단위 매칭이라 claim/description/figure 구분 없음
+                'location': None,  # Patent-level matching does not distinguish claim/description/figure locations.
                 'unit_ref': None,
             })
 
@@ -132,8 +121,8 @@ def build_molecule_and_patent_molecule(records):
 
 
 def build_examiner_citation(records):
-    # ground_truth_label == 1 인 쌍만 "실제 인용된 선행특허"(gold)로 취급.
-    # category/rejection_type은 db_export_2_fill_citation_category.py 가 채움.
+    # Only ground_truth_label == 1 pairs are treated as actual cited prior-art gold.
+    # db_export_2_fill_citation_category.py fills category/rejection_type.
     rows = []
     for i, r in enumerate(records):
         if r.get('ground_truth_label') != 1:
@@ -153,8 +142,8 @@ def build_examiner_citation(records):
 
 
 def build_split(records, split_map, cutoff_year):
-    # split_map은 레코드(파일명) 단위 train/test - target은 query, prior는 corpus
-    # 역할로 펼쳐서 patent_id 단위로 변환
+    # Expand record/filename-level split_map roles (target=query, prior=corpus)
+    # to patent_id-level assignments.
     id_role_split = {}
     for r in records:
         rec_split = split_map.get(r.get('filename'))
@@ -168,7 +157,7 @@ def build_split(records, split_map, cutoff_year):
     return fieldnames, list(id_role_split.values())
 
 
-# db_export_3_task2_tables.py 가 채우기 전까지는 빈 스키마만
+# Empty schemas until db_export_3_task2_tables.py populates them.
 EMPTY_TABLES = {
     'claim_element': ['element_id', 'patent_id', 'claim_no', 'element_no', 'element_text', 'element_smiles'],
     'paragraph': ['para_id', 'patent_id', 'para_no', 'text'],
@@ -196,14 +185,14 @@ def main():
         'filled_pub_date': sum(1 for r in rows if r['pub_date']),
         'filled_title': sum(1 for r in rows if r['title']),
         'filled_has_structure_true': sum(1 for r in rows if r['has_structure']),
-        'note': 'pub_date/app_date/family_id/title/description_text 미채움 (미착수)',
+        'note': 'pub_date/app_date/family_id/title/description_text not populated (not yet implemented)',
     }
 
     mol_fn, mol_rows, pm_fn, pm_rows = build_molecule_and_patent_molecule(records)
     _, n_mol = write_csv(out_dir, 'molecule', mol_fn, mol_rows)
     _, n_pm = write_csv(out_dir, 'patent_molecule', pm_fn, pm_rows)
-    coverage['tables']['molecule'] = {'rows': n_mol, 'note': 'morgan_fp 미채움 (미착수)'}
-    coverage['tables']['patent_molecule'] = {'rows': n_pm, 'note': 'location 구분 정보 없음'}
+    coverage['tables']['molecule'] = {'rows': n_mol, 'note': 'morgan_fp not populated (not yet implemented)'}
+    coverage['tables']['patent_molecule'] = {'rows': n_pm, 'note': 'No location breakdown available'}
 
     ec_fn, ec_rows = build_examiner_citation(records)
     _, n_ec = write_csv(out_dir, 'examiner_citation', ec_fn, ec_rows)
@@ -211,7 +200,7 @@ def main():
         'rows': n_ec,
         'filled_category': sum(1 for r in ec_rows if r['category']),
         'filled_rejection_type': sum(1 for r in ec_rows if r['rejection_type']),
-        'note': 'category/rejection_type은 db_export_2_fill_citation_category.py 에서 채움',
+        'note': 'category/rejection_type populated by db_export_2_fill_citation_category.py',
     }
 
     sp_fn, sp_rows = build_split(records, split_map, cutoff_year)
@@ -220,13 +209,13 @@ def main():
 
     for name, fieldnames in EMPTY_TABLES.items():
         _, n = write_csv(out_dir, name, fieldnames, [])
-        coverage['tables'][name] = {'rows': 0, 'note': 'db_export_3_task2_tables.py 에서 채움(exam_case/case_relevance 제외)'}
+        coverage['tables'][name] = {'rows': 0, 'note': 'Populated by db_export_3_task2_tables.py (except exam_case/case_relevance)'}
 
     coverage_path = os.path.join(out_dir, 'coverage_report.json')
     with open(coverage_path, 'w', encoding='utf-8') as f:
         json.dump(coverage, f, indent=2, ensure_ascii=False)
 
-    print(f'11개 테이블 CSV + coverage_report.json 을 {out_dir} 에 저장했습니다.')
+    print(f'Saved 11 CSV tables and coverage_report.json to {out_dir}.')
     print(json.dumps(coverage, indent=2, ensure_ascii=False))
 
 

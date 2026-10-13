@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""MoLFormer 평가용 SMILES를 모델 학습 조건에 맞게 준비한다.
-
-SureChEMBL canonical SMILES에서 입체 표현을 제거하고, tokenizer 길이가
-고정 상한을 넘는 구조를 제외한다. 특허별 중복 구조를 합친 실행
-입력과 후보·query 커버리지를 함께 기록한다. 모델 가중치는 다운로드하지
-않고 tokenizer만 사용한다.
-"""
+"""Prepare MoLFormer SMILES to match model training conditions. Remove stereochemical notation from SureChEMBL canonical SMILES; exclude inputs exceeding the fixed tokenizer length limit. Deduplicate structures per patent and record candidate/query coverage. Use the tokenizer only, without downloading model weights."""
 
 from __future__ import annotations
 
@@ -111,7 +105,7 @@ def load_and_normalize_structures(
         required = {"patent_id", "canonical_smiles"}
         missing = required - set(reader.fieldnames or [])
         if missing:
-            raise SystemExit(f"구조 파일의 필수 열이 없습니다: {sorted(missing)}")
+            raise SystemExit(f"Missing required columns in structure file: {sorted(missing)}")
         for row_number, row in enumerate(reader, start=2):
             counts["input_rows"] += 1
             patent_id = str(row.get("patent_id") or "").strip()
@@ -131,7 +125,7 @@ def load_and_normalize_structures(
             normalized_links[(patent_id, normalized)] += 1
             counts["accepted_source_rows"] += 1
             if row_number % 50000 == 0:
-                print(f"  SMILES 정규화 {row_number - 1}개 행 처리", flush=True)
+                print(f"  SMILES normalized: {row_number - 1} rows processed", flush=True)
     normalized_unique_smiles = {smiles for _, smiles in normalized_links}
     counts["source_unique_smiles_strings"] = len(source_smiles_strings)
     counts["source_unique_patent_smiles_links"] = len(source_links)
@@ -146,7 +140,7 @@ def load_and_normalize_structures(
     counts["nonisomeric_patent_smiles_link_collapses"] = (
         len(source_links) - len(normalized_links)
     )
-    # 기존 manifest 소비자와의 호환성을 위해 이전 집계 키도 유지한다.
+    # Keep legacy aggregate keys for compatibility with existing manifest consumers.
     counts["stereochemistry_or_duplicate_collapses"] = (
         counts["accepted_source_rows"] - len(normalized_links)
     )
@@ -169,13 +163,13 @@ def tokenize_lengths(
         )
         input_ids = encoded["input_ids"]
         if len(input_ids) != len(batch):
-            raise SystemExit("tokenizer 출력 행 수가 입력과 다릅니다")
+            raise SystemExit("Tokenizer output row count differs from input")
         for smiles, token_ids in zip(batch, input_ids, strict=True):
             lengths[smiles] = len(token_ids)
         completed = min(start + batch_size, len(smiles_values))
         if completed % 10000 < batch_size or completed == len(smiles_values):
             print(
-                f"  tokenizer 길이 {completed}/{len(smiles_values)}개 구조 처리",
+                f"  Tokenizer lengths: {completed}/{len(smiles_values)} structures processed",
                 flush=True,
             )
     return lengths
@@ -193,7 +187,7 @@ def run_self_test() -> None:
         isomericSmiles=False,
     )
     assert summarize_lengths([1, 2, 3, 4, 5])["p95"] == 5
-    print("자체 검증을 통과했습니다.")
+    print("Self-check passed.")
 
 
 def main() -> int:
@@ -218,12 +212,12 @@ def main() -> int:
         args.output_dir,
     ]
     if any(path is None for path in required):
-        parser.error("구조, 후보, ground truth, 출력 인자가 필요합니다")
+        parser.error("Require structures, candidates, ground truth, and output arguments")
     for path in (args.structures, args.candidate_patents, args.ground_truth):
         if not path.is_file():
-            raise SystemExit(f"입력 파일이 없습니다: {path}")
+            raise SystemExit(f"Input file missing: {path}")
     if args.maximum_tokens < 1 or args.tokenizer_batch_size < 1:
-        parser.error("token 상한과 batch 크기는 1 이상이어야 합니다")
+        parser.error("Token limit and batch size must be at least 1")
 
     try:
         from huggingface_hub import HfApi
@@ -231,7 +225,7 @@ def main() -> int:
         from transformers import AutoTokenizer
         import transformers
     except ImportError as exc:
-        raise SystemExit(f"MoLFormer 입력 준비 의존성이 없습니다: {exc}") from exc
+        raise SystemExit(f"Missing MoLFormer input-preparation dependency: {exc}") from exc
 
     try:
         from .evaluate_t2_structure_retrieval import (
@@ -257,10 +251,10 @@ def main() -> int:
     model_info = HfApi().model_info(args.model_id, revision=args.revision)
     resolved_revision = str(model_info.sha or "")
     if not resolved_revision:
-        raise SystemExit("Hugging Face에서 checkpoint revision을 확인하지 못했습니다")
+        raise SystemExit("Could not verify the checkpoint revision on Hugging Face")
     if len(args.revision) == 40 and resolved_revision != args.revision:
         raise SystemExit(
-            f"checkpoint revision이 다릅니다: {args.revision} != {resolved_revision}"
+            f"Checkpoint revision mismatch: {args.revision} != {resolved_revision}"
         )
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_id,
@@ -355,8 +349,8 @@ def main() -> int:
         "resolved_revision": resolved_revision,
         "model_weights_downloaded": False,
         "smiles_policy": (
-            "RDKit canonical non-isomeric SMILES; 특허별 중복 제거; "
-            "tokenizer special token 포함 길이 상한 초과 구조 제외; truncation 금지"
+            "RDKit canonical non-isomeric SMILES; deduplicate per patent; "
+            "exclude structures exceeding the tokenizer limit including special tokens; never truncate"
         ),
         "maximum_tokens": args.maximum_tokens,
         "candidate_count": len(candidate_ids),
@@ -395,7 +389,7 @@ def main() -> int:
                 "nonisomeric_patent_smiles_link_collapses", 0
             ),
             "interpretation": (
-                "source 행 중복과 입체정보 제거에 따른 구조·특허연결 병합을 분리 집계"
+                "Count source-row duplicates separately from structure/patent-link merging after stereochemistry removal"
             ),
         },
         "eligibility": eligibility,

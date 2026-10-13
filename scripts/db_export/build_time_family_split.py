@@ -8,7 +8,7 @@ from config.settings import DATA_DIR, ID_PATENT_MAP_PATH
 
 
 class UnionFind:
-    """문자열 키(특허번호)에 대한 간단한 disjoint-set(union-find)"""
+    """Disjoint-set (union-find) for string keys such as patent identifiers."""
 
     def __init__(self):
         self.parent = {}
@@ -49,7 +49,7 @@ def build_split(dataset_path, id_patent_map_path, test_fraction=0.2, out_path=No
 
     id_map = load_id_patent_map(id_patent_map_path)
 
-    # 각 레코드에 특허번호/연도 정보 부여
+    # Attach patent identifiers and years to each record.
     enriched = []
     for r in records:
         stem = r['filename'].replace('.json', '')
@@ -64,8 +64,8 @@ def build_split(dataset_path, id_patent_map_path, test_fraction=0.2, out_path=No
     resolved = [r for r in enriched if r['target_patent_id'] and r['file_year']]
     unresolved = [r for r in enriched if not (r['target_patent_id'] and r['file_year'])]
 
-    # Cutoff 연도: 특허 패밀리 병합 이전, resolved 레코드들의 연도 분포에서
-    # (1 - test_fraction) 분위수 - "가장 최근 test_fraction 비율을 TEST로" 하는 초기 split
+    # Before merging connected patents, choose the (1 - test_fraction) year
+    # quantile of resolved records; the latest test_fraction initially forms TEST.
     years_sorted = sorted(r['file_year'] for r in resolved)
     if years_sorted:
         idx = int(len(years_sorted) * (1 - test_fraction))
@@ -74,8 +74,8 @@ def build_split(dataset_path, id_patent_map_path, test_fraction=0.2, out_path=No
     else:
         cutoff_year = None
 
-    # 특허번호 기준 union-find: target/prior 특허번호를 다른 레코드와 공유하면
-    # 반드시 같은 split에 속하도록 함(패밀리/자기 누출 방지)
+    # Union by shared target/prior patent identifiers across records,
+    # forcing connected records into one split to prevent self/related-record leakage.
     uf = UnionFind()
     for r in resolved:
         keys = [k for k in (r['target_patent_id'], r['prior_patent_id']) if k]
@@ -84,7 +84,7 @@ def build_split(dataset_path, id_patent_map_path, test_fraction=0.2, out_path=No
         for a, b in zip(keys, keys[1:]):
             uf.union(a, b)
 
-    # 서로 다른 레코드끼리 특허번호(target 또는 prior) 중 하나라도 공유하면 함께 묶음
+    # Group records sharing any target or prior patent identifier.
     key_to_root = {}
     for r in resolved:
         for k in (r['target_patent_id'], r['prior_patent_id']):
@@ -95,8 +95,8 @@ def build_split(dataset_path, id_patent_map_path, test_fraction=0.2, out_path=No
                 uf.union(key_to_root[k], root)
             key_to_root[k] = uf.find(k)
 
-    # 컴포넌트 -> 해당 컴포넌트에서 관측된 최소 연도 (보수적 접근: 패밀리 내 어디서든
-    # cutoff 이전 등장이 있으면 패밀리 전체를 TRAIN으로 배정)
+    # Assign each component its earliest observed year; conservatively place
+    # the whole component in TRAIN if any member predates the cutoff.
     component_min_year = {}
     record_component = {}
     for r in resolved:
@@ -116,7 +116,7 @@ def build_split(dataset_path, id_patent_map_path, test_fraction=0.2, out_path=No
             split[r['filename']] = 'train'
 
     for r in unresolved:
-        split[r['filename']] = 'train_unresolved'  # 특허번호/연도 없음 -> leak-free 검증 불가, test에서 제외
+        split[r['filename']] = 'train_unresolved'  # Missing patent identifiers/year prevent leakage checks; exclude from test.
 
     counts = {
         'train': sum(1 for v in split.values() if v == 'train'),

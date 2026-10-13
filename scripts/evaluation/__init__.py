@@ -1,1 +1,1 @@
-# 검색 성능 평가 스크립트
+# Retrieval evaluation scripts.

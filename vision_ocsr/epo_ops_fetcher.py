@@ -14,9 +14,9 @@ from data_parser.patent_fulltext_parser import (
 
 
 def _build_ssl_context():
-    # python.org에서 받은 macOS Python은 시스템 인증서 저장소를 안 쓰기 때문에
-    # CERTIFICATE_VERIFY_FAILED가 흔히 발생 - certifi의 CA 번들을 명시적으로 사용
-    # (pip install certifi로 설치돼 있으면 자동 사용, 없으면 기본 컨텍스트로 폴백)
+    # macOS Python from python.org does not use the system certificate store;
+    # use certifi's CA bundle explicitly to avoid CERTIFICATE_VERIFY_FAILED.
+    # Use certifi when installed; otherwise fall back to the default SSL context.
     try:
         import certifi
         return ssl.create_default_context(cafile=certifi.where())
@@ -35,15 +35,8 @@ def _dedupe_preserve_order(items):
 
 
 class EPOOPSFetcher:
-    """EPO Open Patent Services(OPS) REST API로 공개 도면 이미지를 가져오는 클래스
-
-    로컬 XML 코퍼스에는 도면 파일명만 참조돼 있고 실제 이미지가 없어서(원본 대용량
-    아카이브 미보유), OPS API로 필요한 특허의 도면 페이지만 개별 조회해서 보충함.
-    무료(Non-paying) 등급 기준 주당 3.5GB 트래픽 제한 - OCSR_MAX_PAGES_PER_PATENT로
-    특허 1건당 받아오는 페이지 수를 제한해 쿼터를 보호함
-
-    인증: OAuth2 client_credentials 플로우(Consumer Key/Secret -> access_token,
-    토큰은 약 20분 후 만료되므로 만료 임박 시 자동 재발급)
+    """Retrieve public drawing images via EPO Open Patent Services (OPS) REST API. Local XML contains drawing filenames but not image files because the original archive is unavailable. Download required pages individually. The non-paying tier's 3.5GB weekly traffic allowance is protected by OCSR_MAX_PAGES_PER_PATENT.
+    OAuth2 client_credentials exchanges Consumer Key/Secret for an access_token; tokens expire after about 20 minutes and are refreshed before expiration.
     """
 
     AUTH_URL = 'https://ops.epo.org/3.2/auth/accesstoken'
@@ -64,7 +57,7 @@ class EPOOPSFetcher:
         self._token_expires_at = 0
 
     def _get_access_token(self):
-        # 만료 60초 전이면 미리 재발급(요청 도중 만료되는 것 방지)
+        # Refresh 60 seconds before expiration to avoid expiry during a request.
         if self._access_token and time.time() < self._token_expires_at - 60:
             return self._access_token
 
@@ -87,25 +80,25 @@ class EPOOPSFetcher:
         return self._access_token
 
     def clean_ep_number(self, ep_doc_number):
-        # kind code까지 제거한 순수 숫자만 추출 - 캐시 키/파일명 전용, OPS 조회에는
-        # 절대 쓰지 말 것(kind code를 지우면 안 되는 이유는 epodoc_reference() 참고)
-        # 예: 'EP07075413NWB1' -> '07075413', 'EP-4013497-B1' -> '4013497'
+        # Strip to numeric identifiers only for cache keys/filenames, never OPS lookup;
+        # epodoc_reference() explains why OPS references retain kind codes.
+        # Examples: 'EP07075413NWB1' -> '07075413', 'EP-4013497-B1' -> '4013497'.
         num = ep_doc_number.replace('EP', '').replace('-', '').strip()
         num = re.sub(r'(NWA|NWB|NW)\d*$', '', num)
         num = re.sub(r'[A-Z]\d*$', '', num)
         return num
 
     def epodoc_reference(self, ep_doc_number):
-        # OPS 조회용 참조 - kind code(A1/B1 등)는 유지하되 대시는 제거.
-        # kind code를 지우면 OPS가 페이지 구성이 다른 엉뚱한 공보를 돌려줄 수 있어
-        # bbox가 잘못된 내용을 가리키게 됨(실제로 이 문제로 본문 텍스트가 크롭된 적
-        # 있음). 대시는 PatCID identifiers의 SureChEMBL 포맷('EP-3705311-A1')에
-        # 섞여 있는데 남기면 OPS가 404를 반환해서 제거 필요.
+        # OPS reference: retain kind code (A1/B1 etc.), but remove hyphens.
+        # Removing kind codes can retrieve a different publication/page layout,
+        # causing incorrect bbox crops; body text was cropped in a previous incident.
+        # PatCID identifiers may use SureChEMBL notation ('EP-3705311-A1');
+        # retaining those hyphens causes OPS 404 responses.
         ref = ep_doc_number.replace('EP', '').replace('-', '').strip()
         return ref
 
     def extract_kind_code(self, ep_doc_number):
-        # 식별자에서 kind code만 추출. 'EP-3705311-A1' -> 'A1', 'EP3705311' -> None
+        # Extract kind code: 'EP-3705311-A1' -> 'A1', 'EP3705311' -> None.
         s = str(ep_doc_number).strip().replace('EP', '').replace('-', '')
         base = re.sub(r'(NWA|NWB|NW)\d*$', '', s)
         base = re.sub(r'[A-Z]\d*$', '', base)
@@ -114,12 +107,12 @@ class EPOOPSFetcher:
         return None
 
     def list_available_images(self, ep_doc_number):
-        # 이미지 인벤토리 조회 - OPS images 엔드포인트는 kind code를 붙이면 404를
-        # 반환하므로 항상 bare 번호로 조회. 대신 해당 특허의 모든 공보(A1, B1, ...)를
-        # <ops:inquiry-result> 블록별로 한꺼번에 돌려주므로, 블록의 <kind> 태그로
-        # 구분해 instances_by_kind로 분리 반환 - 실제 kind code 선택은
-        # fetch_full_document_pages()에서 수행(공보마다 페이지 구성이 다르므로 아무거나
-        # 쓰면 안 됨)
+        # OPS images rejects kind-coded references with 404; query the bare number.
+        # The response includes publications A1, B1, etc. in separate
+        # <ops:inquiry-result> blocks; split by each block's <kind> tag
+        # into instances_by_kind. Select the intended kind code in
+        # fetch_full_document_pages(); publication layouts differ and are not
+        # interchangeable.
         if not self.enabled:
             return {'status': 'DISABLED', 'instances_by_kind': {}}
 
@@ -139,9 +132,9 @@ class EPOOPSFetcher:
             except Exception:
                 pass
 
-            # <ops:inquiry-result>...</ops:inquiry-result> 블록 단위로 잘라서 블록마다
-            # kind code와 그 안의 document-instance들을 같이 묶어 파싱 (블록 경계를 넘어
-            # 다른 kind code의 인스턴스와 섞이지 않도록)
+            # Parse each <ops:inquiry-result> block together with its own kind code
+            # and document-instance entries to avoid mixing publications
+            # across block boundaries.
             instances_by_kind = {}
             for block_match in re.finditer(r'<ops:inquiry-result\b.*?</ops:inquiry-result>', text, re.DOTALL):
                 block = block_match.group(0)
@@ -180,24 +173,24 @@ class EPOOPSFetcher:
             return {'status': f'ERROR: {e}', 'instances_by_kind': {}, 'requested_url': url}
 
     def fetch_drawing_pages(self, ep_doc_number, max_pages=None):
-        # 미사용 - fetch_full_document_pages()로 대체됨(kind code 선택 로직이 없어서
-        # PatCID bbox와 짝을 맞출 수 없음). desc='Drawing' 인스턴스만 찾아 다운로드.
+        # Unused: replaced by fetch_full_document_pages(). Without kind selection,
+        # this method cannot align PatCID boxes; it downloads only desc='Drawing'.
         if not self.enabled:
-            return {'status': 'DISABLED', 'image_paths': [], 'message': 'EPO OPS Consumer Key/Secret이 설정되지 않음.'}
+            return {'status': 'DISABLED', 'image_paths': [], 'message': 'EPO OPS Consumer Key/Secret is not configured.'}
 
         max_pages = max_pages or OCSR_MAX_PAGES_PER_PATENT
         inventory = self.list_available_images(ep_doc_number)
         if inventory['status'] != 'SUCCESS':
-            return {'status': inventory['status'], 'image_paths': [], 'message': '이미지 인벤토리 조회 실패'}
+            return {'status': inventory['status'], 'image_paths': [], 'message': 'Image inventory lookup failed'}
 
         all_instances = [i for kind_list in inventory['instances_by_kind'].values() for i in kind_list]
-        # desc 값이 문서마다 'Drawing', 'FullDocumentDrawing' 등으로 다를 수 있어 'drawing'
-        # 포함 여부로 느슨하게 매칭 (list_available_images가 남긴 debug XML로 실제 값 확인 가능)
+        # Match 'drawing' loosely because desc can be 'Drawing', 'FullDocumentDrawing',
+        # etc.; inspect actual values in list_available_images debug XML.
         drawing_instance = next((i for i in all_instances if 'drawing' in i['desc'].lower()), None)
         if not drawing_instance:
             found_descs = [i['desc'] for i in all_instances]
             return {'status': 'NO_DRAWING_INSTANCE', 'image_paths': [],
-                    'message': f'이 특허는 OPS 상 도면 인스턴스가 없음 (발견된 desc 목록: {found_descs})'}
+                    'message': f'No OPS drawing instances for this patent (available desc values: {found_descs})'}
 
         n_pages = min(drawing_instance['number_of_pages'], max_pages)
         ep_number = self.clean_ep_number(ep_doc_number)
@@ -214,25 +207,16 @@ class EPOOPSFetcher:
                 with urllib.request.urlopen(req, timeout=20, context=self._ssl_context) as resp, open(save_path, 'wb') as f:
                     f.write(resp.read())
                 image_paths.append(save_path)
-            return {'status': 'SUCCESS', 'image_paths': image_paths, 'message': f'{len(image_paths)}페이지 다운로드 완료'}
+            return {'status': 'SUCCESS', 'image_paths': image_paths, 'message': f'{len(image_paths)}page download complete'}
         except urllib.error.HTTPError as e:
             return {'status': f'HTTP_ERROR_{e.code}', 'image_paths': image_paths, 'message': str(e)}
         except Exception as e:
             return {'status': f'ERROR: {e}', 'image_paths': image_paths, 'message': str(e)}
 
     def fetch_full_document_pages(self, ep_doc_number, page_numbers, desired_kind=None):
-        """FullDocument 인스턴스에서 PatCID bbox가 가리키는 절대 페이지 번호들만 다운로드
-        (Drawing 전용 인스턴스의 자체 페이지 번호와는 다름 - vision_ocsr/patcid_bbox_cropper.py 참고)
-
-        desired_kind: PatCID bbox가 실제로 계산된 공보의 kind code(예: 'A1'). 명시하지
-        않으면 다른 kind code의 FullDocument를 받아와 bbox가 엉뚱한 페이지를 가리킬 수
-        있어, list_available_images()가 kind code별로 분리해 돌려준 인벤토리에서 정확히
-        이 kind code만 선택함
-
-        반환: {page_number: image_path}
-        """
+        """Download FullDocument pages using PatCID's absolute page numbers, not Drawing-instance page numbers (see vision_ocsr/patcid_bbox_cropper.py). desired_kind specifies the publication used for PatCID bbox computation, e.g. 'A1'. Select only that kind from list_available_images(), since another publication can have a different page layout. Return {page_number: image_path}."""
         if not self.enabled:
-            return {'status': 'DISABLED', 'image_paths': {}, 'message': 'EPO OPS Consumer Key/Secret이 설정되지 않음.'}
+            return {'status': 'DISABLED', 'image_paths': {}, 'message': 'EPO OPS Consumer Key/Secret is not configured.'}
 
         inventory = self.list_available_images(ep_doc_number)
         if inventory['status'] != 'SUCCESS':
@@ -240,10 +224,10 @@ class EPOOPSFetcher:
             if inventory.get('requested_url'):
                 detail_bits.append(f"URL: {inventory['requested_url']}")
             if inventory.get('error_body'):
-                detail_bits.append(f"응답: {inventory['error_body']}")
+                detail_bits.append(f"Response: {inventory['error_body']}")
             detail = (' | ' + ' / '.join(detail_bits)) if detail_bits else ''
             return {'status': inventory['status'], 'image_paths': {},
-                    'message': f'이미지 인벤토리 조회 실패{detail}'}
+                    'message': f'Image inventory lookup failed{detail}'}
 
         instances_by_kind = inventory['instances_by_kind']
 
@@ -256,24 +240,24 @@ class EPOOPSFetcher:
             full_doc_instance = _full_doc_in(instances_by_kind[desired_kind])
             used_kind = desired_kind
         elif not desired_kind:
-            # PatCID identifiers에 kind code가 아예 없어 원하는 kind code를 알 수 없는
-            # 경우에 한해서만 'A1'(최초 공개공보)을 기본값으로 시도 - PatCID가 화학구조
-            # bbox를 계산할 때 주로 최초 공개된 A1 문서를 사용하는 경향이 있어서임
-            # (desired_kind가 명시됐는데 못 찾은 경우는 아래에서 그냥 실패 처리 -
-            # 임의의 다른 kind code로 조용히 대체하지 않음)
+            # Only when PatCID identifiers contain no kind code and the intended kind
+            # is unknown, try 'A1' (first publication) as the default;
+            # PatCID commonly computes boxes from the initial A1 publication.
+            # If an explicitly requested desired_kind is absent, fail below rather than
+            # silently substituting another kind code.
             if 'A1' in instances_by_kind:
                 full_doc_instance = _full_doc_in(instances_by_kind['A1'])
                 used_kind = 'A1'
 
         if not full_doc_instance:
-            # 원하는 kind code에 FullDocument 인스턴스가 없으면(그 공보엔 이미지가 아예
-            # 없는 경우) - 대신 신뢰할 수 있는 대체가 없다는 뜻이므로 절대 임의의 다른
-            # kind code로 조용히 넘어가지 않고 실패로 보고 (bbox가 다른 레이아웃을
-            # 가리키게 되는 문제를 방지) - 상위(ocsr_pipeline)에서 NOT_FOUND 처리
+            # If the requested publication lacks a FullDocument instance, there is no
+            # trustworthy substitute. Never silently select a different kind code;
+            # report failure to avoid using bbox coordinates on another layout.
+            # The upstream ocsr_pipeline treats this as NOT_FOUND.
             available_kinds = list(instances_by_kind.keys())
             return {'status': 'DESIRED_KIND_NOT_AVAILABLE', 'image_paths': {},
-                    'message': f'요청한 kind code({desired_kind})의 FullDocument 인스턴스가 없음 '
-                                f'(사용 가능한 kind code: {available_kinds})'}
+                    'message': f'No FullDocument instance for requested kind code ({desired_kind}) '
+                                f'(available kind codes: {available_kinds})'}
 
         ep_number = self.clean_ep_number(ep_doc_number)
         image_paths = {}
@@ -291,7 +275,7 @@ class EPOOPSFetcher:
                 with urllib.request.urlopen(req, timeout=20, context=self._ssl_context) as resp, open(save_path, 'wb') as f:
                     f.write(resp.read())
                 image_paths[page] = save_path
-            return {'status': 'SUCCESS', 'image_paths': image_paths, 'message': f'{len(image_paths)}페이지 다운로드 완료',
+            return {'status': 'SUCCESS', 'image_paths': image_paths, 'message': f'{len(image_paths)}page download complete',
                     'used_kind': used_kind}
         except urllib.error.HTTPError as e:
             return {'status': f'HTTP_ERROR_{e.code}', 'image_paths': image_paths, 'message': str(e), 'used_kind': used_kind}
@@ -299,20 +283,11 @@ class EPOOPSFetcher:
             return {'status': f'ERROR: {e}', 'image_paths': image_paths, 'message': str(e), 'used_kind': used_kind}
 
     def fetch_biblio_data(self, ep_doc_number):
-        """OPS published-data/biblio 엔드포인트로 서지 메타데이터 조회 - 특허번호만
-        있으면 되고 원본 도면/전문 데이터는 필요 없음. PatCID/SureChEMBL과 달리
-        여기에만 있는 정보: 발명 명칭(title), 출원인(applicants), 발명자(inventors),
-        공개일(publication date), IPC 분류(classification). 필요하면 청구항 전문은
-        같은 kind code로 /claims 엔드포인트를, 명세서 전문은 /description 엔드포인트를
-        별도 호출해서 받을 수 있음(이 메서드는 biblio만 처리)
-
-        kind code를 유지한 epodoc 참조로 먼저 시도하고, 404가 나면 images
-        엔드포인트에서 이미 겪은 것과 같은 문제(kind code 붙은 조회 거부)일 수
-        있어 kind code 없는 bare 참조로 한 번 더 시도함 - 둘 다 실패하면 그
-        특허번호 자체가 없거나 형식이 잘못된 것
+        """Fetch bibliographic metadata from OPS published-data/biblio using only a patent number. Retrieves title, applicants, inventors, publication date, and IPC classification not provided by the local PatCID/SureChEMBL connection. This method processes biblio only; claims and description require separate endpoints with the same kind code.
+        Try a kind-preserving epodoc reference first, then a bare reference on 404, since kind-coded references may be rejected as with images. Failure of both suggests an absent or malformed patent identifier.
         """
         if not self.enabled:
-            return {'status': 'DISABLED', 'message': 'EPO OPS Consumer Key/Secret이 설정되지 않음.'}
+            return {'status': 'DISABLED', 'message': 'EPO OPS Consumer Key/Secret is not configured.'}
 
         ref = self.epodoc_reference(ep_doc_number)
         bare_ref = self.clean_ep_number(ep_doc_number)
@@ -335,20 +310,20 @@ class EPOOPSFetcher:
                 except Exception:
                     pass
 
-                # 정식 XML 파서 없이 정규식으로 필요한 필드만 뽑음(파일 전체의 다른
-                # 메서드와 일관된 스타일) - 다국어 title 중 첫 번째, applicant/inventor는
-                # 여러 명일 수 있어 findall로 전부 수집. EPO는 같은 이름을 대괄호 표기와
-                # DOCDB 표기로 중복 기재하는 경우가 많아 순서를 유지한 채 중복 제거
+                # Extract needed fields with regex, matching the style of other methods.
+                # Take the first multilingual title; collect all applicants/inventors with
+                # findall, then deduplicate EPO bracket/DOCDB name variants
+                # while preserving their original order.
                 title_m = re.search(r'<invention-title[^>]*>([^<]+)</invention-title>', text)
                 applicants = _dedupe_preserve_order(re.findall(r'<applicant-name>\s*<name>([^<]+)</name>', text))
                 inventors = _dedupe_preserve_order(re.findall(r'<inventor-name>\s*<name>([^<]+)</name>', text))
                 pub_date_m = re.search(r'<publication-reference>.*?<date>(\d{8})</date>', text, re.DOTALL)
-                # <application-reference doc-id="..."> 처럼 속성이 붙어 있어 태그를 [^>]*로 매칭
-                # (publication-reference와 다르게 항상 속성이 붙어 있음 - 실사 확인됨)
+                # Match attributes on <application-reference doc-id="..."> with [^>]*;
+                # inspected responses consistently include them, unlike publication-reference.
                 app_date_m = re.search(r'<application-reference[^>]*>.*?<date>(\d{8})</date>', text, re.DOTALL)
-                # patent family id는 <exchange-document family-id="..."> 속성으로 옴(본문 태그가 아님)
+                # family_id is an <exchange-document family-id="..."> attribute, not a body tag.
                 family_id_m = re.search(r'<exchange-document[^>]*\bfamily-id="([^"]+)"', text)
-                # <classification-ipcr sequence="N"> 처럼 속성이 붙어 있어 태그를 [^>]*로 매칭
+                # Match attributes such as <classification-ipcr sequence="N"> with [^>]*.
                 ipc_codes = _dedupe_preserve_order(re.findall(r'<classification-ipcr[^>]*>\s*<text>([^<]+)</text>', text))
 
                 return {
@@ -370,23 +345,16 @@ class EPOOPSFetcher:
                     err_body = ''
                 last_error = {'status': f'HTTP_ERROR_{e.code}', 'requested_url': url, 'error_body': err_body[:300]}
                 if e.code != 404:
-                    return last_error  # 404 외의 에러는 재시도해도 의미 없음
+                    return last_error  # Retrying non-404 errors is not useful here.
             except Exception as e:
                 return {'status': f'ERROR: {e}', 'requested_url': url}
 
         return last_error
 
     def _fetch_fulltext_xml(self, endpoint, ep_doc_number):
-        """/claims, /description처럼 전문 XML을 돌려주는 엔드포인트 공용 호출부.
-        fetch_biblio_data()와 같은 kind-code-유지 -> bare 순 재시도 패턴을 씀.
-        원본 XML 텍스트와 디버그 저장 경로만 반환하고, 태그 파싱은 호출자(fetch_claims_data/
-        fetch_description_data)가 함 - OPS 응답은 로컬 XML 코퍼스와 태그 구조가 달라서
-        (실사 확인됨: id/num 속성 없이 <claim-text>가 쭉 나열되는 'text-only' 포맷) 로컬용
-        parse_paragraphs/parse_figures/parse_claim_elements가 아니라 OPS 전용 파서
-        (parse_ops_*)를 씀
-        """
+        """Shared caller for full-text XML endpoints such as /claims and /description. Retry kind-preserving then bare references as in fetch_biblio_data(). Return raw XML and its debug path; fetch_claims_data/fetch_description_data parse it. Inspected OPS responses are text-only, with consecutive <claim-text> entries lacking id/num attributes, unlike local XML. Use OPS-specific parse_ops_* rather than local parse_paragraphs/parse_figures/parse_claim_elements."""
         if not self.enabled:
-            return {'status': 'DISABLED', 'message': 'EPO OPS Consumer Key/Secret이 설정되지 않음.'}
+            return {'status': 'DISABLED', 'message': 'EPO OPS Consumer Key/Secret is not configured.'}
 
         ref = self.epodoc_reference(ep_doc_number)
         bare_ref = self.clean_ep_number(ep_doc_number)
@@ -425,9 +393,7 @@ class EPOOPSFetcher:
         return last_error
 
     def fetch_claims_data(self, ep_doc_number):
-        """OPS /claims 엔드포인트로 청구항 전문을 받아 claim_element 단위로 파싱.
-        로컬 XML 코퍼스가 없는 TARGET 특허의 claim_no를 채우는 용도(기존엔 claim_no 없이
-        '- ' 구분자 근사 분리만 가능했음) - element_no 세분화는 여전히 '- ' 구분자 근사"""
+        """Fetch OPS /claims and parse claim elements for TARGET patents without local XML. Recover claim_no from numbering; element_no still uses approximate '- ' splitting, which previously operated without claim numbers."""
         result = self._fetch_fulltext_xml('claims', ep_doc_number)
         if result['status'] != 'SUCCESS':
             return result
@@ -435,10 +401,7 @@ class EPOOPSFetcher:
         return result
 
     def fetch_description_data(self, ep_doc_number):
-        """OPS /description 엔드포인트로 명세서 전문을 받아 문단/도면을 파싱.
-        TARGET 특허의 paragraph/figure를 채우는 용도(기존엔 PRIOR만 로컬 XML로 가능했음).
-        도면은 OPS 응답에 <figure> 태그 자체가 없어 "Fig. N ..." 문장 매칭 근사치이고
-        image_path는 항상 None(원본 도면 파일 정보가 없음)"""
+        """Fetch OPS /description and populate TARGET paragraphs/figures, previously available only for PRIOR local XML. OPS lacks <figure> tags, so captions approximate 'Fig. N ...' sentences; image_path remains None without source drawing-file metadata."""
         result = self._fetch_fulltext_xml('description', ep_doc_number)
         if result['status'] != 'SUCCESS':
             return result

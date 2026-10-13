@@ -1,26 +1,8 @@
-"""
-OPS API로 patent_content의 서지 정보(pub_date/app_date/family_id/title, 전체 특허 대상)와
-TARGET 특허의 전문(paragraph/figure/claim_element)을 채운다.
-db_export_1/2/3_*.py를 먼저 실행해서 data/db_export/가 만들어져 있어야 함.
-
-범위:
-  biblio(pub_date/app_date/family_id/title) : patent_content의 전체 특허(TARGET+PRIOR)
-  claims/description(paragraph/figure/claim_element) : TARGET 특허만
-    - PRIOR은 이미 로컬 전문 XML(db_export_3)로 정확하게 채워져 있어 재작업 불필요
-    - 기존 TARGET claim_element는 '- ' 구분자 근사치(claim_no 없음)였는데, 이번에
-      OPS 기반(claim_no 있음)으로 교체됨
-
-재실행 안전(resumable):
-  data/db_export/ops_cache/<patent_id>.json 에 특허별 fetch 결과를 캐시함.
-  이미 캐시된 특허는 재요청하지 않아서 중간에 끊겨도 다시 실행하면 이어서 진행됨.
-
-주의: 무료(Non-paying) 등급은 요청 빈도 제한이 있어서 --sleep으로 호출 사이 대기 시간을
-둠. 4,123개 전체를 한 번에 돌리기 전에 --limit으로 소량 먼저 테스트해볼 것을 권장.
-
-사용법 (맥 .venv):
-    export EPO_OPS_CONSUMER_KEY=... EPO_OPS_CONSUMER_SECRET=...
-    python3 scripts/db_export/db_export_4_ops_fulltext.py --limit 20      # 먼저 20개만 테스트
-    python3 scripts/db_export/db_export_4_ops_fulltext.py                 # 전체 실행(오래 걸림)
+"""Populate patent_content bibliography (pub_date/app_date/family_id/title) for all TARGET+PRIOR patents and TARGET paragraph/figure/claim_element using OPS. Requires data/db_export from db_export_1/2/3_*.py.
+PRIOR already uses local XML from db_export_3; replace approximate TARGET '- ' elements without claim_no with OPS elements containing claim_no.
+Cache per-patent results in data/db_export/ops_cache/<patent_id>.json for resumable requests.
+Use --sleep to respect non-paying rate limits; try --limit before processing all 4,123 patents.
+Set EPO_OPS_CONSUMER_KEY/EPO_OPS_CONSUMER_SECRET, then run python3 scripts/db_export/db_export_4_ops_fulltext.py --limit 20 before a full run.
 """
 import os
 import sys
@@ -64,7 +46,7 @@ def _strip_debug_keys(d):
 
 
 def fetch_one(fetcher, patent_id, need_fulltext, sleep_sec):
-    """biblio는 모든 특허, claims/description은 TARGET 특허(need_fulltext)일 때만 조회"""
+    """Fetch bibliography for every patent, and claims/description only for TARGET (need_fulltext)."""
     entry = {'patent_id': patent_id}
 
     entry['biblio'] = _strip_debug_keys(fetcher.fetch_biblio_data(patent_id))
@@ -89,8 +71,8 @@ def is_complete(cached, need_fulltext):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--limit', type=int, default=None, help='테스트용 - 앞에서 N개 특허만 처리')
-    parser.add_argument('--sleep', type=float, default=0.5, help='API 호출 사이 대기 시간(초, rate limit 보호)')
+    parser.add_argument('--limit', type=int, default=None, help='Process only the first N patents for a small trial')
+    parser.add_argument('--sleep', type=float, default=0.5, help='Delay between API calls in seconds to protect rate limits')
     args = parser.parse_args()
 
     out_dir = os.path.join(DATA_DIR, 'db_export')
@@ -100,16 +82,16 @@ def main():
     pc_path = os.path.join(out_dir, 'patent_content.csv')
     split_path = os.path.join(out_dir, 'split.csv')
     if not os.path.exists(pc_path) or not os.path.exists(split_path):
-        print('[FAIL] patent_content.csv / split.csv가 없습니다. db_export_1_core_tables.py 먼저 실행해주세요.')
+        print('[FAIL] patent_content.csv / split.csv missing. Run db_export_1_core_tables.py first.')
         sys.exit(1)
 
     patents = read_csv_rows(pc_path)
     target_ids = {r['id'] for r in read_csv_rows(split_path) if r['role'] == 'query'}
-    print(f'전체 특허 {len(patents)}개, 그 중 TARGET(전문까지 조회) {len(target_ids)}개')
+    print(f'Total patents: {len(patents)}; TARGET (full-text retrieval): {len(target_ids)} entries')
 
     fetcher = EPOOPSFetcher()
     if not fetcher.enabled:
-        print('[FAIL] Consumer Key/Secret이 설정되지 않았습니다: '
+        print('[FAIL] Consumer Key/Secret is not configured: '
               'export EPO_OPS_CONSUMER_KEY=... / EPO_OPS_CONSUMER_SECRET=...')
         sys.exit(1)
 
@@ -130,11 +112,11 @@ def main():
             if entry['biblio'].get('status') != 'SUCCESS':
                 n_biblio_failed += 1
         if i % 50 == 0 or i == len(patent_ids):
-            print(f'  {i}/{len(patent_ids)} 처리 (신규조회 {n_new}, 캐시재사용 {n_cached}, biblio실패 {n_biblio_failed})')
+            print(f'  {i}/{len(patent_ids)} processed (new requests {n_new}, cache reuse {n_cached}, biblio failures {n_biblio_failed})')
 
-    print(f'\n조회 완료 - 신규 {n_new}건, 캐시 재사용 {n_cached}건, biblio 실패 {n_biblio_failed}건')
+    print(f'\nLookup complete - new {n_new}; cache reuse {n_cached}; biblio failures {n_biblio_failed} records')
 
-    # --- patent_content.csv: 이미 값이 있으면 덮어쓰지 않고 빈 값만 채움 ---
+    # --- patent_content.csv: fill empty values only; never overwrite existing values ---
     filled = {'pub_date': 0, 'app_date': 0, 'family_id': 0, 'title': 0}
     for p in patents:
         cached = load_cache(cache_dir, p['patent_id'])
@@ -149,10 +131,10 @@ def main():
                 filled[csv_field] += 1
 
     write_csv(pc_path, list(patents[0].keys()), patents)
-    print(f'patent_content.csv 갱신: pub_date +{filled["pub_date"]}, app_date +{filled["app_date"]}, '
+    print(f'patent_content.csv updated: pub_date +{filled["pub_date"]}, app_date +{filled["app_date"]}, '
           f'family_id +{filled["family_id"]}, title +{filled["title"]}')
 
-    # --- TARGET paragraph/figure/claim_element: 기존 TARGET 행(근사치 포함)은 버리고 OPS로 다시 채움 ---
+    # --- Replace existing TARGET paragraph/figure/claim_element rows (including approximations) using OPS ---
     para_path = os.path.join(out_dir, 'paragraph.csv')
     fig_path = os.path.join(out_dir, 'figure.csv')
     ce_path = os.path.join(out_dir, 'claim_element.csv')
@@ -178,7 +160,7 @@ def main():
         desc = cached.get('description', {})
         if desc.get('status') == 'SUCCESS':
             for j, para in enumerate(desc.get('paragraphs', []), start=1):
-                para_no = para['para_no'] or f'h{j}'  # 번호 없는 소제목 문단은 hN으로 대체
+                para_no = para['para_no'] or f'h{j}'  # Assign hN identifiers to unnumbered headings.
                 para_rows.append({'para_id': f'{pid}_p{para_no}', 'patent_id': pid,
                                    'para_no': para['para_no'], 'text': para['text']})
                 n_para += 1
@@ -192,8 +174,8 @@ def main():
     write_csv(fig_path, ['fig_id', 'patent_id', 'fig_no', 'caption', 'image_path', 'ocsr_smiles'], fig_rows)
     write_csv(ce_path, ['element_id', 'patent_id', 'claim_no', 'element_no', 'element_text', 'element_smiles'], ce_rows)
 
-    print(f'TARGET 행 추가: paragraph +{n_para}, figure +{n_fig}, claim_element +{n_ce}')
-    print(f'(도면 image_path는 OPS 응답에 파일 정보가 없어 전부 None - 알려진 한계)')
+    print(f'TARGET rows added: paragraph +{n_para}, figure +{n_fig}, claim_element +{n_ce}')
+    print(f'(all drawing image_path values are None: OPS responses lack file metadata; known limitation)')
 
 
 if __name__ == '__main__':

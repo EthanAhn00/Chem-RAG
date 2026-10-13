@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""SureChEMBL 2.0에서 T2 후보 특허의 exact-document 구조만 추출한다.
-
-대상 특허번호의 국가·공개번호·kind code가 모두 같은 SureChEMBL 문서만 주 입력으로
-채택한다. 같은 공개번호이지만 kind code가 다른 문서는 진단 통계에만 포함한다.
-재현 가능한 날짜 고정 원격 URL 또는 서버에 미리 받은 Parquet 스냅샷을 읽을 수 있다.
-"""
+"""Extract exact-document structures for T2 candidates from SureChEMBL 2.0. Require matching country/publication number/kind code. Other kind codes for the same number are diagnostic only. Read a reproducible date-pinned remote URL or predownloaded server Parquet snapshot."""
 
 from __future__ import annotations
 
@@ -77,7 +72,7 @@ def load_targets(path: Path, id_column: str) -> list[dict[str, str]]:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         if not reader.fieldnames or id_column not in reader.fieldnames:
-            raise SystemExit(f"후보 파일에 {id_column!r} 열이 없습니다: {path}")
+            raise SystemExit(f"Candidate file lacks {id_column!r} column missing: {path}")
         for row_number, row in enumerate(reader, start=2):
             raw = str(row.get(id_column) or "").strip()
             parsed = parse_exact_ep_patent(raw)
@@ -87,7 +82,7 @@ def load_targets(path: Path, id_column: str) -> list[dict[str, str]]:
             exact_key, base_key = parsed
             if exact_key in targets and targets[exact_key]["raw_patent_id"] != raw:
                 raise SystemExit(
-                    "동일 exact 특허번호로 정규화되는 서로 다른 값이 있습니다: "
+                    "Distinct values normalize to the same exact patent ID: "
                     f"{targets[exact_key]['raw_patent_id']!r}, {raw!r}"
                 )
             targets[exact_key] = {
@@ -97,9 +92,9 @@ def load_targets(path: Path, id_column: str) -> list[dict[str, str]]:
             }
     if invalid:
         preview = ", ".join(invalid[:10])
-        raise SystemExit(f"kind code를 포함한 EP 특허번호가 아닌 행이 있습니다: {preview}")
+        raise SystemExit(f"Row is not an EP patent identifier with a kind code: {preview}")
     if not targets:
-        raise SystemExit(f"유효한 후보 특허번호가 없습니다: {path}")
+        raise SystemExit(f"No valid candidate patent identifiers: {path}")
     return [targets[key] for key in sorted(targets)]
 
 
@@ -133,7 +128,7 @@ def configure_duckdb(
 
 def report_stage(message: str, started_at: float) -> float:
     now = time.perf_counter()
-    print(f"{message} (소요 {now - started_at:.1f}초)", flush=True)
+    print(f"{message} (elapsed {now - started_at:.1f} seconds)", flush=True)
     return now
 
 
@@ -152,36 +147,36 @@ def main() -> int:
     parser.add_argument(
         "--snapshot-base-url",
         default=DEFAULT_SNAPSHOT_BASE_URL,
-        help="날짜가 고정된 SureChEMBL 2.0 bulk snapshot URL",
+        help="Date-pinned SureChEMBL 2.0 bulk snapshot URL",
     )
     parser.add_argument(
         "--snapshot-dir",
         type=Path,
-        help="서버에 미리 다운로드한 날짜 고정 Parquet 디렉터리",
+        help="Predownloaded date-pinned Parquet directory on the server",
     )
     parser.add_argument(
         "--threads",
         type=int,
         default=1,
-        help="DuckDB 작업 스레드 수(원격 입력은 1 권장)",
+        help="DuckDB worker threads (1 recommended for remote inputs)",
     )
     args = parser.parse_args()
 
     if not args.candidate_patents.is_file():
-        raise SystemExit(f"후보 특허 파일이 없습니다: {args.candidate_patents}")
+        raise SystemExit(f"Candidate patent file missing: {args.candidate_patents}")
     if args.threads < 1:
-        parser.error("--threads는 1 이상이어야 합니다")
+        parser.error("--threads must be at least 1")
     if args.snapshot_base_url.rstrip("/").endswith("/latest"):
-        parser.error("재현성을 위해 latest 대신 날짜가 고정된 snapshot URL을 사용하세요")
+        parser.error("Use a date-pinned snapshot URL, not latest, for reproducibility")
 
     try:
         import duckdb
     except ImportError as exc:
-        raise SystemExit("duckdb가 필요합니다: pip install duckdb==1.5.5") from exc
+        raise SystemExit("duckdb is required: pip install duckdb==1.5.5") from exc
     try:
         from rdkit import Chem, RDLogger, rdBase
     except ImportError as exc:
-        raise SystemExit("RDKit이 필요합니다") from exc
+        raise SystemExit("RDKit is required") from exc
 
     RDLogger.DisableLog("rdApp.*")
     targets = load_targets(args.candidate_patents, args.candidate_id_column)
@@ -207,7 +202,7 @@ def main() -> int:
         ]
         if missing:
             raise SystemExit(
-                "필수 SureChEMBL Parquet 파일이 없습니다: " + ", ".join(missing)
+                "Required SureChEMBL Parquet files missing: " + ", ".join(missing)
             )
         snapshot_files = {
             label: str(snapshot_dir / file_name)
@@ -215,7 +210,7 @@ def main() -> int:
         }
         input_mode = "server_local_files"
 
-    print(f"대상 특허 {len(targets)}개를 불러왔습니다.", flush=True)
+    print(f"Target patents: {len(targets)} loaded.", flush=True)
     connection = duckdb.connect()
     settings = configure_duckdb(
         connection,
@@ -241,7 +236,7 @@ def main() -> int:
 
     stage_started_at = time.perf_counter()
     patents_url = sql_string(snapshot_files["patents"])
-    print("SureChEMBL 특허 문서를 조회합니다.", flush=True)
+    print("Looking up SureChEMBL patent documents.", flush=True)
     connection.execute(
         f"""
         CREATE TEMP TABLE matched_patents AS
@@ -277,7 +272,7 @@ def main() -> int:
           ON p.remote_base_key = t.base_key
         """
     )
-    stage_started_at = report_stage("특허 문서 조회를 완료했습니다.", stage_started_at)
+    stage_started_at = report_stage("Patent document lookup complete.", stage_started_at)
     connection.execute(
         """
         CREATE TEMP TABLE exact_patents AS
@@ -288,7 +283,7 @@ def main() -> int:
     )
 
     map_url = sql_string(snapshot_files["patent_compound_map"])
-    print("exact 문서의 화합물 연결을 조회합니다.", flush=True)
+    print("Looking up compound links for exact documents.", flush=True)
     connection.execute(
         f"""
         CREATE TEMP TABLE matched_mappings AS
@@ -301,10 +296,10 @@ def main() -> int:
           ON m.patent_id = p.surechembl_patent_id
         """
     )
-    stage_started_at = report_stage("화합물 연결 조회를 완료했습니다.", stage_started_at)
+    stage_started_at = report_stage("Compound-link lookup complete.", stage_started_at)
 
     compounds_url = sql_string(snapshot_files["compounds"])
-    print("연결된 화합물 구조를 조회합니다.", flush=True)
+    print("Looking up linked compound structures.", flush=True)
     connection.execute(
         f"""
         CREATE TEMP TABLE matched_compounds AS
@@ -317,7 +312,7 @@ def main() -> int:
           ON c.id = m.compound_id
         """
     )
-    stage_started_at = report_stage("화합물 구조 조회를 완료했습니다.", stage_started_at)
+    stage_started_at = report_stage("Compound-structure lookup complete.", stage_started_at)
 
     fields_url = sql_string(snapshot_files["fields"])
     field_rows = connection.execute(
@@ -615,9 +610,9 @@ def main() -> int:
             if input_mode == "server_local_files"
         },
         "match_policy": {
-            "primary": "국가·공개번호·kind code가 모두 일치하는 exact document만 사용",
-            "base_only": "같은 공개번호의 다른 kind code는 통계만 기록하고 구조 입력에서 제외",
-            "family": "이 단계에서는 특허 패밀리 구조를 사용하지 않음",
+            "primary": "Use only exact documents matching country/publication number/kind code",
+            "base_only": "Record other kind codes diagnostically but exclude them from structure inputs",
+            "family": "Patent-family structures are not used at this stage",
         },
         "duckdb_version": duckdb.__version__,
         "rdkit_version": rdBase.rdkitVersion,

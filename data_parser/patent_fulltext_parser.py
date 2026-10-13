@@ -1,7 +1,4 @@
-"""EPO 특허문서(ep-patent-document DTD) 전문 XML에서 문단/도면/청구항 한정사항을
-뽑는 공용 파서. 로컬 XML(EPO_priorEPO_matched_xml_only)과 OPS API(/description,
-/claims) 응답이 같은 DTD를 쓰기 때문에 두 경로 모두 이 모듈을 재사용한다.
-"""
+"""Shared paragraph, figure, and claim-element parser for EPO ep-patent-document XML. Local XML (EPO_priorEPO_matched_xml_only) and OPS /description and /claims responses share this DTD, so both paths reuse this module."""
 import re
 
 
@@ -11,7 +8,7 @@ def _strip_tags(s):
 
 
 def parse_paragraphs(text):
-    """<description>...<p id num>본문</p>... 에서 [{'para_no','text'}, ...] 추출"""
+    """Extract [{'para_no','text'}, ...] from <description>...<p id num>body</p>... ."""
     desc_m = re.search(r'<description.*?</description>', text, re.DOTALL)
     desc = desc_m.group(0) if desc_m else ''
     paragraphs = []
@@ -23,15 +20,14 @@ def parse_paragraphs(text):
 
 
 def parse_figures(text):
-    """<figure id num> 목록 + "Description of the Drawing" 섹션의 <li> 문장에서
-    캡션과 <img> 파일명을 매칭해 {fig_id: {'fig_no','caption','image_path'}} 반환"""
+    """Match <figure id num>, captions from <li> sentences in 'Description of the Drawing', and <img> filenames. Return {fig_id: {'fig_no','caption','image_path'}}."""
     desc_m = re.search(r'<description.*?</description>', text, re.DOTALL)
     desc = desc_m.group(0) if desc_m else ''
 
     figures = {fid: {'fig_no': fnum, 'caption': None, 'image_path': None}
                for fid, fnum in re.findall(r'<figure id="([^"]+)" num="([^"]+)">', text)}
 
-    # 같은 <li> 안에 함께 나오는 모든 <figref idref="..."> 아이디에 그 문장을 캡션으로 부여
+    # Assign the same <li> sentence as caption to every referenced <figref idref="...">.
     for li_body in re.findall(r'<li>(.*?)</li>', desc, re.DOTALL):
         caption_text = _strip_tags(li_body)
         for group in re.findall(r'<figref idref="([^"]+)"', li_body):
@@ -39,7 +35,7 @@ def parse_figures(text):
                 if fid in figures and not figures[fid]['caption']:
                     figures[fid]['caption'] = caption_text
 
-    # figure id 'f0001' <-> img id 'if0001' 관례(전체 코퍼스에서 100% 보장되진 않음)
+    # Conventional figure 'f0001' <-> image 'if0001' mapping; not guaranteed throughout the corpus.
     img_by_id = dict(re.findall(r'<img id="([^"]+)" file="([^"]+)"', text))
     for fid, meta in figures.items():
         meta['image_path'] = img_by_id.get('i' + fid)
@@ -48,9 +44,7 @@ def parse_figures(text):
 
 
 def parse_ops_paragraphs(text):
-    """OPS /description 응답(text-only 포맷)에서 문단 추출. 로컬 XML과 달리 <p id num>이
-    아니라 그냥 <p>[번호]    본문</p> 형태라 번호가 텍스트 안에 대괄호로 박혀 있음.
-    "Field of the Invention" 같은 소제목 문단은 번호가 없어 para_no=None으로 남김."""
+    """Extract paragraphs from OPS text-only /description responses. Unlike local <p id num> XML, numbering appears inside <p>[number] body</p>. Unnumbered headings such as 'Field of the Invention' retain para_no=None."""
     desc_m = re.search(r'<description[^>]*>(.*?)</description>', text, re.DOTALL)
     desc = desc_m.group(1) if desc_m else ''
     paragraphs = []
@@ -67,10 +61,7 @@ def parse_ops_paragraphs(text):
 
 
 def parse_ops_figures_heuristic(text):
-    """OPS /description 응답엔 <figure> 태그 자체가 없어(로컬 XML과 결정적으로 다른 점)
-    도면 목록을 구조적으로 뽑을 수 없음. 대신 본문에서 "Fig. N ..." 패턴이 나오는
-    문장을 캡션 후보로 잡는 근사치 - image_path는 원본 도면 파일 정보가 아예 없어
-    항상 None."""
+    """OPS /description has no <figure> tags, unlike local XML. Approximate captions using sentences matching 'Fig. N ...'; image_path is always None because source drawing-file metadata is unavailable."""
     desc_m = re.search(r'<description[^>]*>(.*?)</description>', text, re.DOTALL)
     desc = desc_m.group(1) if desc_m else ''
     figures = {}
@@ -85,20 +76,14 @@ def parse_ops_figures_heuristic(text):
 
 
 def parse_ops_claim_elements(text):
-    """OPS /claims 응답(text-only 포맷)에서 청구항 추출. 로컬 XML과 달리 <claim
-    id num>으로 청구항이 나뉘어 있지 않고, 전체 청구항이 <claim> 태그 하나 안에
-    <claim-text> 여러 개로 이어져 있음. claim_no는 각 청구항 첫 <claim-text> 맨 앞의
-    "1. ", "2. " 같은 번호 패턴으로만 알 수 있어, 그 패턴이 나오면 새 청구항 시작으로
-    보고 그 다음부터 나오는 <claim-text>들(한정사항 '- ' 불릿 등)을 같은 claim_no에
-    element_no 순서대로 붙임. 반환 형식은 parse_claim_elements와 동일:
-    [(claim_no, element_no, text), ...]"""
+    """Extract claims from OPS text-only /claims. Unlike local <claim id num>, one <claim> contains multiple <claim-text> elements. Detect each claim start using leading '1. ', '2. ', etc.; attach subsequent limitation bullets to the same claim_no with sequential element_no. Return [(claim_no, element_no, text), ...], as in parse_claim_elements."""
     claim_m = re.search(r'<claim[^>]*>(.*?)</claim>', text, re.DOTALL)
     if not claim_m:
         return []
     blocks = re.findall(r'<claim-text>(.*?)</claim-text>', claim_m.group(1), re.DOTALL)
 
-    # "- " 구분자로 한정사항 단위까지 더 쪼갬 - TARGET 근사 분리(split_target_claim_heuristic)와
-    # 같은 방식이라 PRIOR/TARGET 두 경로의 element 세분화 수준을 맞춤
+    # Further split limitations at '- ', matching split_target_claim_heuristic
+    # so PRIOR and TARGET paths use comparable element granularity.
     claim_elements = []
     claim_no, element_no = None, 0
     for raw in blocks:
@@ -119,9 +104,7 @@ def parse_ops_claim_elements(text):
 
 
 def parse_claim_elements(text):
-    """청구항 하나당 <claim-text> 태그가 여러 겹 중첩됨(전문을 감싸는 최상위 1개 +
-    한정사항마다 중첩된 것들). 태그 하나당 '자기 텍스트(다음 태그 전까지)'를 element
-    하나로 잡아야 한정사항 단위로 쪼개짐. 반환: [(claim_no, element_no, text), ...]"""
+    """Each claim has nested <claim-text> tags: an outer full-text tag and inner limitations. Treat each tag's own text, before the next tag, as one element. Return [(claim_no, element_no, text), ...]."""
     claim_elements = []
     for claim_no, body in re.findall(r'<claim id="[^"]+" num="(\d+)">(.*?)</claim>', text, re.DOTALL):
         elements = [re.sub(r'\s+', ' ', m.group(1)).strip()

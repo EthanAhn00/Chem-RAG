@@ -1,9 +1,4 @@
-"""설정 문자열 -> 인코더 인스턴스 해석.
-
-dense 백엔드는 요청한 것이 설치돼 있지 않으면 예외를 던진다(조용히 다른 모델로
-바꿔치기하면 결과 해석이 틀어지므로). 명시적으로 fallback을 허용할 때만
-allow_fallback=True를 쓴다.
-"""
+"""Resolve configuration strings to encoder instances. Raise when the requested dense backend is unavailable rather than silently substituting a model and invalidating interpretation. Set allow_fallback=True only when fallback is explicitly permitted."""
 import os
 
 from .dense_encoder import (
@@ -17,7 +12,7 @@ DENSE_BACKENDS = ('static-vectors', 'hashing', 'fastembed', 'sentence-transforme
 def build_dense_encoder(settings, allow_fallback=False, idf_state_path=None):
     backend = (settings.dense_backend or 'hashing').strip().lower()
     if backend not in DENSE_BACKENDS:
-        raise ValueError(f'알 수 없는 dense 백엔드: {backend} (가능: {DENSE_BACKENDS})')
+        raise ValueError(f'Unknown dense backend: {backend} (available: {DENSE_BACKENDS})')
 
     try:
         if backend == 'fastembed':
@@ -35,10 +30,10 @@ def build_dense_encoder(settings, allow_fallback=False, idf_state_path=None):
     except Exception as exc:
         if not allow_fallback:
             raise RuntimeError(
-                f"dense 백엔드 '{backend}'({settings.dense_model}) 초기화 실패: {type(exc).__name__}: {exc}\n"
-                f"CHEMRAG_DENSE_BACKEND=hashing 으로 두면 외부 모델 없이 동작합니다."
+                f"dense backend '{backend}'({settings.dense_model}) initialization failed: {type(exc).__name__}: {exc}\n"
+                f"Set CHEMRAG_DENSE_BACKEND=hashing to run without external models."
             ) from exc
-        print(f'[registry] {backend} 사용 불가({type(exc).__name__}) - hashing 백엔드로 대체합니다')
+        print(f'[registry] {backend} unavailable ({type(exc).__name__}) - falling back to the hashing backend')
         return HashingDenseEncoder(dim=settings.dense_dim)
 
 

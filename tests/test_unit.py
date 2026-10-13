@@ -1,6 +1,5 @@
-"""단위 테스트 - Qdrant DB 없이 실행 가능.
-
-    python3 tests/test_unit.py          (또는 python3 -m pytest tests/test_unit.py)
+"""Unit tests requiring no Qdrant DB.
+Usage: python3 tests/test_unit.py or python3 -m pytest tests/test_unit.py.
 """
 import os
 import sys
@@ -37,7 +36,7 @@ def test_point_ids_are_deterministic_uuid5():
     for bad in ('', None):
         try:
             patent_point_id(bad)
-            raise AssertionError('빈 patent_id는 거부되어야 한다')
+            raise AssertionError('Empty patent_id must be rejected')
         except ValueError:
             pass
 
@@ -45,12 +44,12 @@ def test_point_ids_are_deterministic_uuid5():
 def test_text_fields_and_vector_config():
     assert build_field_text('T', 'C', 'claims') == ('C', False)
     assert build_field_text('T', 'C', 'title_claims') == ('T\nC', False)
-    # claims가 없으면 버리지 않고 title만 쓰며 missing 표시
+    # Retain title-only patents with missing-claims status.
     assert build_field_text('T', '', 'title_claims') == ('T', True)
     assert build_field_text('T', '', 'claims') == ('', True)
     try:
         build_field_text('T', 'C', 'nope')
-        raise AssertionError('알 수 없는 필드는 거부되어야 한다')
+        raise AssertionError('Unknown fields must be rejected')
     except ValueError:
         pass
     assert set(patent_vectors_config(300)) == {'claims_dense', 'title_claims_dense'}
@@ -61,7 +60,7 @@ def test_filter_rules_and_policies():
     f = build_prior_art_filter('EP_Q', '20200101', 'FAM1')
     keys = [c.key for c in f.qdrant_filter.must_not if hasattr(c, 'key')]
     assert 'patent_id' in keys and 'family_id' in keys and f.qdrant_filter.must
-    # app_date / family_id 가 없으면 해당 조건을 걸지 않는다
+    # Missing app_date / family_id skips the corresponding condition.
     f2 = build_prior_art_filter('EP_Q', '', '')
     assert not f2.qdrant_filter.must
     assert [c.key for c in f2.qdrant_filter.must_not if hasattr(c, 'key')] == ['patent_id']
@@ -72,7 +71,7 @@ def test_filter_rules_and_policies():
 
 
 def test_attach_filter_injects_into_every_prefetch_branch():
-    """최상위 query_filter만으로는 prefetch가 필터링되지 않는다(실측 확인된 Qdrant 동작)."""
+    """A top-level query_filter does not filter prefetch, as observed in Qdrant."""
     f = build_prior_art_filter('EP_Q', '20200101', 'FAM1')
     prefetches = [models.Prefetch(query=[0.1, 0.2], using='title_claims_dense', limit=10),
                   models.Prefetch(query=models.SparseVector(indices=[1], values=[1.0]),
@@ -86,7 +85,7 @@ def test_fusion_query_options():
     assert fusion_query('dbsf').fusion == models.Fusion.DBSF
     try:
         fusion_query('nope')
-        raise AssertionError('알 수 없는 fusion은 거부되어야 한다')
+        raise AssertionError('Unknown fusion must be rejected')
     except ValueError:
         pass
 
@@ -104,7 +103,7 @@ def test_encoders_deterministic():
     score = sum(dv * qv for di, dv in zip(d_idx, d_val) for qi, qv in zip(q_idx, q_val) if di == qi)
     assert score > 0
     assert b.encode_query('zzzznonexistent') == ([], [])
-    # 토큰 리스트를 직접 넘겨도 동일 결과
+    # Supplying token lists directly must give the same result.
     toks = [b.tokenizer.tokenize('ethylene polymer composition')]
     assert b.encode_documents(['ethylene polymer composition'], token_lists=toks)[0] == (d_idx, d_val)
 
@@ -112,7 +111,7 @@ def test_encoders_deterministic():
 def test_exact_tanimoto_semantics():
     f1, f2 = build_fingerprint('CCO'), build_fingerprint('CCCO')
     assert max_tanimoto([f1], [f2]) == 0.5556 and max_tanimoto([f1], [f1]) == 1.0
-    assert max_tanimoto([f1], []) is None and max_tanimoto([], []) is None   # 없음 != 0
+    assert max_tanimoto([f1], []) is None and max_tanimoto([], []) is None   # Missing != 0.
     assert build_fingerprint('not-a-smiles!!') is None and morgan_bits('CCO')
 
 
@@ -133,7 +132,7 @@ def test_structure_weight_renormalization_and_rerank():
 
 
 def test_average_precision_definition():
-    """AP = sum(정답 위치별 precision) / 전체 정답 수. 미회수 정답은 0 기여."""
+    """AP = sum(precision at gold ranks) / all gold; unretrieved gold contributes zero."""
     gold = {'P2', 'P5'}
     full = evaluate_ranking([f'P{i}' for i in range(1, 11)], gold)
     assert abs(full['ap'] - 0.45) < 1e-9
@@ -147,34 +146,34 @@ def test_average_precision_definition():
 
 
 def test_structure_location_metadata_consistency():
-    """파생 산출물이 있으면 3-값 논리/근거/횟수 일관성을 검사한다."""
+    """Check three-valued logic, evidence, and count consistency when derived artifacts exist."""
     from config.settings import DATA_DIR
     path = os.path.join(DATA_DIR, 'db_export', 'derived', 'structure_location_metadata.jsonl')
     if not os.path.exists(path):
-        raise FileNotFoundError(f'{path} 없음 - scripts/qdrant/qdrant_build_structure_metadata.py 실행 필요')
+        raise FileNotFoundError(f'{path} missing - run scripts/qdrant/qdrant_build_structure_metadata.py first')
     seen = set()
     with open(path, 'r', encoding='utf-8') as f:
         for line in f:
             rec = json.loads(line)
             key = (rec['patent_id'], rec['mol_id'])
-            assert key not in seen, f'중복 {key}'
+            assert key not in seen, f'duplicates {key}'
             seen.add(key)
             assert rec['in_claim'] in (TRUE, FALSE, UNKNOWN)
             assert rec['in_figure'] in (TRUE, FALSE, UNKNOWN)
             ev = rec.get('location_evidence') or {}
             occ, ccws = rec['claim_occurrence_count'], rec['claim_count_with_structure']
             if rec['in_claim'] == TRUE:
-                assert ev.get('claim'), 'in_claim=true 는 근거 필요'
+                assert ev.get('claim'), 'in_claim=true requires evidence'
             if rec['in_claim'] == UNKNOWN:
-                assert occ is None, 'unknown 은 0이 아니라 null'
+                assert occ is None, 'unknown means null, not 0'
             if rec['in_claim'] == FALSE:
                 assert occ == 0
             if occ is not None and ccws is not None:
-                assert ccws <= occ, 'claim_count_with_structure 는 occurrence 보다 클 수 없다'
+                assert ccws <= occ, 'claim_count_with_structure cannot exceed occurrence'
             if rec['in_figure'] == TRUE:
                 assert ev.get('figure') and (rec.get('figure_unit_refs') or any(
                     e.get('fig_id') or e.get('unit_ref') for e in ev['figure']))
-    assert len(seen) == 6928, f'구조 메타데이터 레코드 수 {len(seen)}'
+    assert len(seen) == 6928, f'Structure metadata record count: {len(seen)}'
 
 
 class _FakePoint:
@@ -183,7 +182,7 @@ class _FakePoint:
 
 
 class _FakeScrollClient:
-    """scroll()만 흉내내는 최소 클라이언트 - DB 없이 서명 검사 경로를 시험한다."""
+    """Minimal scroll()-only client to test signature checks without a DB."""
 
     def __init__(self, payload):
         self._payload = payload
@@ -204,13 +203,13 @@ class _FakeDense:
 
 
 def test_search_cli_field_option_and_state_paths():
-    """검색 CLI가 필드별 상태 파일을 쓰고 기본 필드가 title_claims 인지."""
+    """Search CLI uses field-specific state files and defaults to title_claims."""
     from scripts.qdrant import qdrant_search as qs
 
     assert qs.DEFAULT_FIELD == 'title_claims'
     for field in TEXT_FIELDS:
         assert os.path.basename(qs.bm25_state_path(field)) == f'bm25_state_{field}.json'
-    # 레거시 단일 상태 파일(bm25_state.json)은 더 이상 참조하지 않는다
+    # Do not reference legacy bm25_state.json.
     assert 'bm25_state.json' not in {os.path.basename(qs.bm25_state_path(f)) for f in TEXT_FIELDS}
 
     ap = qs.build_arg_parser()
@@ -219,7 +218,7 @@ def test_search_cli_field_option_and_state_paths():
     assert ap.parse_args(['--text', 'x', '--field', 'title_claims']).field == 'title_claims'
     try:
         ap.parse_args(['--patent', 'EP1', '--field', 'nope'])
-        raise AssertionError('알 수 없는 --field 는 거부되어야 한다')
+        raise AssertionError('Unknown --field must be rejected')
     except SystemExit:
         pass
 
@@ -230,18 +229,18 @@ def test_search_cli_missing_bm25_state_stops_search():
     settings = load_settings()
     try:
         qs.load_field_encoders(settings, 'claims', state_path='/nonexistent/bm25_state_claims.json')
-        raise AssertionError('BM25 상태 파일이 없으면 검색을 시작하면 안 된다')
+        raise AssertionError('Search must not start without BM25 state')
     except qs.SearchSetupError as exc:
-        assert 'BM25 상태 파일이 없습니다' in str(exc), exc
+        assert 'BM25 state file is missing' in str(exc), exc
     try:
         qs.load_field_encoders(settings, 'nope')
-        raise AssertionError('알 수 없는 필드는 거부되어야 한다')
+        raise AssertionError('Unknown fields must be rejected')
     except qs.SearchSetupError:
         pass
 
 
 def test_search_cli_encoder_signature_guard():
-    """payload의 embedding_signature_by_field 와 다르면 검색 전에 중단한다."""
+    """Stop before search if the encoder differs from payload embedding_signature_by_field."""
     from scripts.qdrant import qdrant_search as qs
 
     settings = load_settings()
@@ -253,40 +252,40 @@ def test_search_cli_encoder_signature_guard():
     assert qs.verify_encoder_signature(_FakeScrollClient(payload), settings, 'title_claims',
                                        _FakeDense('BBB'))['match']
 
-    # 1) 서명이 다르면 중단
+    # 1) Stop on signature mismatch.
     try:
         qs.verify_encoder_signature(_FakeScrollClient(payload), settings, 'claims',
                                     _FakeDense('ZZZ'))
-        raise AssertionError('인코더 불일치인데 검색이 허용됨')
+        raise AssertionError('Search was allowed despite an encoder mismatch')
     except qs.SearchSetupError as exc:
-        assert '인코더 불일치' in str(exc), exc
+        assert 'Encoder mismatch' in str(exc), exc
 
-    # 2) 필드를 잘못 짚어도(claims 벡터에 title_claims 인코더) 중단
+    # 2) Stop on field mismatch, e.g. title_claims encoder with claims vectors.
     try:
         qs.verify_encoder_signature(_FakeScrollClient(payload), settings, 'claims',
                                     _FakeDense('BBB'))
-        raise AssertionError('필드가 어긋났는데 검색이 허용됨')
+        raise AssertionError('Search was allowed despite a field mismatch')
     except qs.SearchSetupError:
         pass
 
-    # 3) 필드별 서명이 아예 없는 구버전 색인이면 중단
+    # 3) Stop for a legacy index without field-specific signatures.
     try:
         qs.verify_encoder_signature(_FakeScrollClient({'embedding_signature': 'BBB'}), settings,
                                     'title_claims', _FakeDense('BBB'))
-        raise AssertionError('필드별 서명이 없는 색인인데 검색이 허용됨')
+        raise AssertionError('Search was allowed without field-specific index signatures')
     except qs.SearchSetupError:
         pass
 
-    # 4) 빈 컬렉션이면 중단
+    # 4) Stop for an empty collection.
     try:
         qs.verify_encoder_signature(_FakeScrollClient(None), settings, 'claims', _FakeDense('AAA'))
-        raise AssertionError('빈 컬렉션인데 검색이 허용됨')
+        raise AssertionError('Search was allowed on an empty collection')
     except qs.SearchSetupError:
         pass
 
 
 def test_map_at_cutoff_naming_and_semantics():
-    """evaluate_qdrant_retrieval.py의 MAP@cutoff 이름/절단/alias 일관성 (search_cli 테스트와 별개)."""
+    """evaluate_qdrant_retrieval.py MAP@cutoff naming/truncation/alias consistency, separate from search CLI tests."""
     assert metric_key_for_cutoff(1000) == 'mean_average_precision_at_1000'
     assert metric_key_for_cutoff(1) == 'mean_average_precision_at_1'
 
@@ -294,7 +293,7 @@ def test_map_at_cutoff_naming_and_semantics():
     ranked = [f'P{i}' for i in range(1, 1501)]
     ap_full = evaluate_ranking(ranked, gold)['ap']
     ap_1000 = evaluate_ranking(ranked[:1000], gold)['ap']
-    assert ap_full > ap_1000, 'cutoff 밖 정답이 절단 시 0 기여해야 한다'
+    assert ap_full > ap_1000, 'Gold beyond the cutoff must contribute zero after truncation'
     assert abs(ap_1000 - 0.5) < 1e-9
 
     per_query = [{'ap': 0.5, 'recall_at_10': 1.0, 'recall_at_100': 1.0, 'recall_at_1000': 1.0,
@@ -328,72 +327,70 @@ def _v2_manifest(*collections):
 
 
 def test_manifest_v2_strict_validation_and_v1_compat():
-    """v2 manifest는 필수 필드 삭제/해시 축약/중복 이름/경로 이탈을 전부 거부해야 한다
-    (필드를 지우면 무결성 검사를 조용히 우회할 수 있었던 취약점에 대한 회귀 테스트).
-    v1(레거시, manifest_version 키 자체가 없던 시절)은 예전처럼 관대하게 받아야 한다."""
+    """v2 rejects missing required fields, truncated hashes, duplicate names, and path escape: regression checks for deletion-based validation bypass. Legacy v1 without manifest_version remains permissive."""
 
-    # 1) 정상 v2는 문제 없이 통과
+    # 1) Valid v2 passes without problems.
     ok_manifest = _v2_manifest(_base_v2_collection_meta())
     assert validate_manifest_structure(ok_manifest) == []
 
-    # 2) archive_sha256 필드 자체를 삭제 -> 거부(이게 이번에 고친 원래 취약점)
+    # 2) Remove archive_sha256 -> reject the original validation-bypass vulnerability.
     m = _base_v2_collection_meta()
     del m['archive_sha256']
     problems = validate_manifest_structure(_v2_manifest(m))
-    assert problems and any('archive_sha256' in p or '필수 필드' in p for p in problems), problems
+    assert problems and any('archive_sha256' in p or 'required fields' in p for p in problems), problems
 
-    # 3) content_sha256 필드 삭제 -> 거부
+    # 3) Remove content_sha256 -> reject.
     m = _base_v2_collection_meta()
     del m['content_sha256']
     problems = validate_manifest_structure(_v2_manifest(m))
-    assert problems and any('content_sha256' in p or '필수 필드' in p for p in problems), problems
+    assert problems and any('content_sha256' in p or 'required fields' in p for p in problems), problems
 
-    # 4) archive_bytes 필드 삭제 -> 거부
+    # 4) Remove archive_bytes -> reject.
     m = _base_v2_collection_meta()
     del m['archive_bytes']
     problems = validate_manifest_structure(_v2_manifest(m))
-    assert problems and any('archive_bytes' in p or '필수 필드' in p for p in problems), problems
+    assert problems and any('archive_bytes' in p or 'required fields' in p for p in problems), problems
 
-    # 5) archive_bytes가 0 이하 -> 거부
+    # 5) archive_bytes <= 0 -> reject.
     problems = validate_manifest_structure(_v2_manifest(_base_v2_collection_meta(archive_bytes=0)))
     assert problems and any('archive_bytes' in p for p in problems), problems
 
-    # 6) 짧은(축약된) SHA-256 -> v2에서는 거부(v1에서는 허용되던 것)
+    # 6) Truncated SHA-256 -> reject in v2, although legacy v1 allowed it.
     problems = validate_manifest_structure(
         _v2_manifest(_base_v2_collection_meta(content_sha256='b' * 32)))
     assert problems and any('content_sha256' in p for p in problems), problems
 
-    # 7) 잘못된 hex 문자 -> 거부
+    # 7) Invalid hexadecimal characters -> reject.
     problems = validate_manifest_structure(
         _v2_manifest(_base_v2_collection_meta(archive_sha256='z' * 64)))
     assert problems and any('archive_sha256' in p for p in problems), problems
 
-    # 8) 중복 collection 이름 -> 거부
+    # 8) Duplicate collection names -> reject.
     m1, m2 = _base_v2_collection_meta(), _base_v2_collection_meta(
         file='chemrag_structures_v1.jsonl.gz', role='structures', alias='chemrag_structures')
     problems = validate_manifest_structure(_v2_manifest(m1, m2))
-    assert problems and any('중복된 collection' in p for p in problems), problems
+    assert problems and any('Duplicate collection' in p for p in problems), problems
 
-    # 9) 중복 alias 이름 -> 거부
+    # 9) Duplicate alias names -> reject.
     m1 = _base_v2_collection_meta()
     m2 = _base_v2_collection_meta(collection='chemrag_structures_v1',
                                   file='chemrag_structures_v1.jsonl.gz', role='structures')
-    # m2의 alias를 m1과 같은 값으로 맞춰 충돌시킨다
+    # Set m2's alias equal to m1's to cause a collision.
     problems = validate_manifest_structure(_v2_manifest(m1, m2))
-    assert problems and any('중복된 alias' in p for p in problems), problems
+    assert problems and any('Duplicate alias' in p for p in problems), problems
 
-    # 10) file 경로 이탈(절대경로) -> 거부
+    # 10) Absolute file-path escape -> reject.
     problems = validate_manifest_structure(
         _v2_manifest(_base_v2_collection_meta(file='/etc/passwd')))
-    assert problems and any('경로' in p for p in problems), problems
+    assert problems and any('path' in p for p in problems), problems
 
-    # 11) file 경로 이탈(../) -> 거부
+    # 11) '../' file-path escape -> reject.
     problems = validate_manifest_structure(
         _v2_manifest(_base_v2_collection_meta(file='../../etc/passwd')))
-    assert problems and any('경로' in p for p in problems), problems
+    assert problems and any('path' in p for p in problems), problems
 
-    # 12) 정상 v1(레거시) 매니페스트는 그대로 통과해야 한다
-    #     (manifest_version 키가 없고, bytes/짧은 content hash 같은 옛 필드명)
+    # 12) Valid legacy v1 manifests must still pass.
+    # No manifest_version; historical bytes and short content-hash fields.
     legacy_v1 = {
         'collections': [{
             'collection': 'chemrag_patents_v1', 'file': 'chemrag_patents_v1.jsonl.gz',
@@ -414,31 +411,29 @@ def _fake_pq_record(cutoff=None):
 
 
 def test_resolve_recompute_cutoff_pure_logic():
-    """--recompute-only가 cutoff를 임의로 추정하지 않는지에 대한 순수 로직 테스트."""
-    # 1) per-query 레코드에 cutoff가 기록돼 있으면(신규 실행분) 그 값을 그대로 쓴다
+    """Pure cutoff-resolution checks ensure --recompute-only never guesses."""
+    # 1) New per-query cutoff metadata is used directly.
     pq = [_fake_pq_record(cutoff=1000), _fake_pq_record(cutoff=1000)]
     cutoff, problem = resolve_recompute_cutoff(pq, fallback_cutoff=None)
     assert problem is None and cutoff == 1000
 
-    # 2) 레코드에 cutoff가 없으면(예전 실행분) 과거 summary의 config.search_limit을 근거로 쓴다
+    # 2) Legacy records without cutoff use previous summary config.search_limit.
     pq_legacy = [_fake_pq_record(cutoff=None), _fake_pq_record(cutoff=None)]
     cutoff, problem = resolve_recompute_cutoff(pq_legacy, fallback_cutoff=1000)
     assert problem is None and cutoff == 1000
 
-    # 3) 레코드에도 없고 과거 summary도 없으면 추정하지 않고 중단 신호를 준다
+    # 3) Without either source, signal stop rather than guessing.
     cutoff, problem = resolve_recompute_cutoff(pq_legacy, fallback_cutoff=None)
     assert cutoff is None and problem is not None
 
-    # 4) 같은 partial 파일 안에 서로 다른 cutoff가 섞여 있으면(데이터 손상) 중단 신호
+    # 4) Mixed cutoffs within a partial file indicate corruption and signal stop.
     pq_mixed = [_fake_pq_record(cutoff=1000), _fake_pq_record(cutoff=500)]
     cutoff, problem = resolve_recompute_cutoff(pq_mixed, fallback_cutoff=None)
     assert cutoff is None and problem is not None
 
 
 def test_recompute_only_rejects_cutoff_mismatch_end_to_end():
-    """run_recompute_only()를 실제로 호출해 top-1000 partial로 MAP@500을 재계산하려 하면
-    종료 코드 1(SystemExit)로 중단되고, 같은 cutoff를 요청하면 정상 성공하는지 확인한다.
-    기존 1,106쿼리 전체 재검색 없이, 가짜 partial 파일만으로 검증한다."""
+    """Call run_recompute_only() with synthetic partial files, without reretrieving 1,106 queries. MAP@500 from a top-1000 partial must stop with SystemExit(1); requesting the same cutoff must succeed."""
     import argparse
     import shutil
     import tempfile
@@ -457,7 +452,7 @@ def test_recompute_only_rejects_cutoff_mismatch_end_to_end():
                 rec['query_id'] = f'Q{i}'
                 f.write(json.dumps(rec) + '\n')
 
-        # (a) 같은 cutoff(1000)로 재계산 요청 -> 성공해야 한다
+        # (a) Recompute at the same cutoff (1000) -> success.
         args_ok = argparse.Namespace(systems=system, search_limit=1000, out_prefix=out_prefix)
         rc = evr.run_recompute_only(args_ok)
         assert rc == 0
@@ -466,24 +461,24 @@ def test_recompute_only_rejects_cutoff_mismatch_end_to_end():
         mkey = 'mean_average_precision_at_1000'
         assert report['summaries'][system][mkey] == report['summaries'][system]['mean_average_precision_map']
 
-        # (b) top-1000 partial인데 MAP@500을 요청 -> 종료 코드 1(SystemExit)로 중단돼야 한다
+        # (b) Request MAP@500 from top-1000 partial -> SystemExit(1).
         args_bad = argparse.Namespace(systems=system, search_limit=500, out_prefix=out_prefix)
         try:
             evr.run_recompute_only(args_bad)
-            raise AssertionError('top-1000 partial로 MAP@500 재계산이 성공해버림(cutoff 오류 미탐지)')
+            raise AssertionError('MAP@500 recomputation from top-1000 partial incorrectly succeeded (cutoff mismatch undetected)')
         except SystemExit as exc:
             assert 'top-1000' in str(exc) or 'cutoff' in str(exc).lower(), exc
 
-        # (c) cutoff 메타데이터도, 과거 summary도 없는 새 out_prefix -> 추정하지 않고 중단
+        # (c) New out_prefix without cutoff metadata or prior summary -> stop without guessing.
         out_prefix2 = 'unit_test_cutoff_guard_no_fallback'
         partial_path2 = os.path.join(tmp, f'{out_prefix2}_{system}.partial.jsonl')
         with open(partial_path2, 'w', encoding='utf-8') as f:
-            rec = _fake_pq_record(cutoff=None)   # cutoff 필드 없음 (예전 실행분 흉내)
+            rec = _fake_pq_record(cutoff=None)   # No cutoff field, simulating legacy records.
             f.write(json.dumps(rec) + '\n')
         args_no_meta = argparse.Namespace(systems=system, search_limit=1000, out_prefix=out_prefix2)
         try:
             evr.run_recompute_only(args_no_meta)
-            raise AssertionError('cutoff 확인 불가인데 중단하지 않고 성공해버림')
+            raise AssertionError('Recomputation succeeded despite an unverifiable cutoff')
         except SystemExit:
             pass
     finally:

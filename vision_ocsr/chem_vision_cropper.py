@@ -2,17 +2,17 @@ import os
 import cv2
 
 class ChemVisionCropper:
-    """도면 이미지에서 2D 화학구조 영역을 검출해 자동으로 BBox를 크롭하는 클래스"""
+    """Detect 2D chemical-structure regions in drawing images and crop bounding boxes."""
 
     def __init__(self, crop_output_dir=None):
-        # 크롭 결과 저장 디렉토리 초기화
+        # Initialize the crop-output directory.
         if crop_output_dir is None:
             crop_output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'crops')
         self.crop_output_dir = crop_output_dir
         os.makedirs(self.crop_output_dir, exist_ok=True)
 
     def crop_chemical_structure(self, image_path, patent_id):
-        # 도면 이미지에서 2D 화학구조 bounding box를 크롭해 PNG로 저장
+        # Crop chemical-structure bounding boxes and save PNG images.
         if not os.path.exists(image_path):
             return []
 

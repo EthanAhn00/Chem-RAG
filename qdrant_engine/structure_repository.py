@@ -1,8 +1,4 @@
-"""구조(특허-분자) 컬렉션 접근 계층 + RDKit exact Tanimoto 계산.
-
-Qdrant에 저장된 Morgan 지문 sparse 벡터는 '후보 생성'에만 쓰고, 유사도 값 자체는
-반드시 RDKit으로 다시 계산한다(Qdrant의 dot/cosine != Tanimoto).
-"""
+"""Structure (patent-molecule) collection access and RDKit exact Tanimoto. Qdrant Morgan sparse vectors are for candidate generation only; recompute similarity with RDKit because Qdrant dot/cosine is not Tanimoto."""
 from collections import defaultdict
 
 from qdrant_client import models
@@ -11,7 +7,7 @@ from .schemas import UNKNOWN
 
 
 def morgan_bits(smiles, radius=2, nbits=2048):
-    """SMILES -> Morgan(ECFP4) on-bit 인덱스 리스트. 파싱 실패 시 None."""
+    """SMILES -> Morgan (ECFP4) on-bit indexes; None on parsing failure."""
     from rdkit import Chem, RDLogger
     from rdkit.Chem import AllChem
     RDLogger.DisableLog('rdApp.*')
@@ -25,7 +21,7 @@ def morgan_bits(smiles, radius=2, nbits=2048):
 
 
 def build_fingerprint(smiles, radius=2, nbits=2048):
-    """RDKit ExplicitBitVect 반환(정확한 Tanimoto 계산용). 실패 시 None."""
+    """Return RDKit ExplicitBitVect for exact Tanimoto, or None on failure."""
     from rdkit import Chem, RDLogger
     from rdkit.Chem import AllChem
     RDLogger.DisableLog('rdApp.*')
@@ -38,7 +34,7 @@ def build_fingerprint(smiles, radius=2, nbits=2048):
 
 
 def max_tanimoto(fps_a, fps_b):
-    """두 특허의 분자 집합 간 최대 Tanimoto. 한쪽이라도 비면 None(0이 아님)."""
+    """Maximum Tanimoto across two patent molecule sets; None, not 0, if either is empty."""
     if not fps_a or not fps_b:
         return None
     from rdkit import DataStructs
@@ -52,7 +48,7 @@ def max_tanimoto(fps_a, fps_b):
 
 
 class StructureRepository:
-    """구조 컬렉션 조회 + 특허별 지문 캐시."""
+    """Structure collection lookup and per-patent fingerprint cache."""
 
     def __init__(self, client, settings, collection=None):
         self.client = client
@@ -60,7 +56,7 @@ class StructureRepository:
         self.collection = collection or settings.structures_collection
         self._fp_cache = {}
 
-    # ------------------------------------------------------------ 조회
+    # ------------------------------------------------------------ Lookup
     def iter_all(self, with_vectors=False, batch=512):
         offset = None
         while True:
@@ -81,7 +77,7 @@ class StructureRepository:
         return [p.payload for p in points]
 
     def load_smiles_index(self):
-        """patent_id -> [smiles] 전체 로드(평가 시 한 번만 호출)."""
+        """Load all patent_id -> [smiles] mappings, once per evaluation."""
         index = defaultdict(list)
         for p in self.iter_all():
             payload = p.payload or {}
@@ -90,7 +86,7 @@ class StructureRepository:
                 index[payload.get('patent_id')].append(smi)
         return dict(index)
 
-    # ------------------------------------------------------- 지문/유사도
+    # ------------------------------------------------------- Fingerprints/similarity
     def fingerprints_for_patent(self, patent_id, smiles_index=None):
         if patent_id in self._fp_cache:
             return self._fp_cache[patent_id]
@@ -106,17 +102,13 @@ class StructureRepository:
         return fps
 
     def exact_tanimoto(self, patent_a, patent_b, smiles_index=None):
-        """두 특허 간 exact Tanimoto(최댓값). 어느 쪽이든 구조가 없으면 None."""
+        """Maximum exact Tanimoto between two patents; None if either lacks structures."""
         return max_tanimoto(
             self.fingerprints_for_patent(patent_a, smiles_index),
             self.fingerprints_for_patent(patent_b, smiles_index))
 
     def approximate_candidates(self, smiles, limit=50):
-        """지문 sparse 벡터로 유사 구조 후보를 뽑는다(근사).
-
-        반환 점수는 Tanimoto가 아니라 on-bit 내적이다. 정렬/필터 용도로만 쓰고
-        실제 유사도는 exact_tanimoto()로 다시 계산해야 한다.
-        """
+        """Approximate structure candidate generation using sparse fingerprints. Returned scores are on-bit dot products, not Tanimoto; use only for ranking/filtering and recompute similarity with exact_tanimoto()."""
         bits = morgan_bits(smiles, self.settings.morgan_radius, self.settings.morgan_nbits)
         if not bits:
             return []
@@ -128,7 +120,7 @@ class StructureRepository:
                  'smiles': p.payload.get('smiles'),
                  'approx_overlap_score': float(p.score), 'is_tanimoto': False} for p in res.points]
 
-    # ------------------------------------------------------------ 통계
+    # ------------------------------------------------------------ Statistics
     def location_coverage_stats(self):
         counts = {'in_claim': defaultdict(int), 'in_figure': defaultdict(int),
                   'location_status': defaultdict(int), 'claim_occurrence_count': {'known': 0, 'null': 0},

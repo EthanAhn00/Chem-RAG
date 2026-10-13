@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""T1 Top-N 후보만 정규화된 T1·T2 점수로 재정렬한다.
-
-Top-N과 alpha는 development query에서 모두 보고하며, Top-N 설정은
-사후에 하나를 고르지 않는 민감도 실험으로 유지한다. 각 Top-N의
-alpha는 development Citation MRR@100으로 선택하고 test에서 고정한다.
-"""
+"""Rerank T1 Top-N using normalized T1/T2 scores. Report Top-N and alpha on development queries, retaining all Top-N sensitivity settings rather than selecting one post hoc. Choose each alpha by development Citation MRR@100 and freeze it on test."""
 
 from __future__ import annotations
 
@@ -74,18 +69,18 @@ def parse_top_n_values(value: str) -> list[int]:
     try:
         values = sorted({int(item.strip()) for item in value.split(",")})
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("Top-N은 정수여야 합니다") from exc
+        raise argparse.ArgumentTypeError("Top-N must be an integer") from exc
     if not values or any(item < 100 for item in values):
-        raise argparse.ArgumentTypeError("Top-N은 100 이상의 정수여야 합니다")
+        raise argparse.ArgumentTypeError("Top-N must be an integer of at least 100")
     return values
 
 
 def zscore_or_zero(values: np.ndarray) -> tuple[np.ndarray, bool]:
-    """분산이 없으면 정보가 없는 신호로 보고 0 벡터를 반환한다."""
+    """Treat zero variance as an uninformative signal and return a zero vector."""
     mean = float(values.mean())
     standard_deviation = float(values.std(ddof=0))
     if not math.isfinite(mean) or not math.isfinite(standard_deviation):
-        raise ValueError("점수 평균 또는 표준편차가 유한수가 아닙니다")
+        raise ValueError("Score mean or standard deviation is nonfinite")
     if standard_deviation <= 1e-15:
         return np.zeros_like(values, dtype=np.float64), True
     return (values - mean) / standard_deviation, False
@@ -97,13 +92,13 @@ def rerank_text_top_n(
     top_n: int,
     alpha: float,
 ) -> tuple[list[tuple[str, float]], bool, bool]:
-    """T1 Top-N 멤버십은 유지하고 그 안의 순서만 변경한다."""
+    """Preserve T1 Top-N membership and change only its internal ordering."""
     text_ids = [patent_id for patent_id, _ in text_ranking]
     structure_ids = [patent_id for patent_id, _ in structure_ranking]
     if set(text_ids) != set(structure_ids):
-        raise ValueError("T1과 T2 ranking의 후보 집합이 다릅니다")
+        raise ValueError("T1/T2 ranking candidate sets differ")
     if top_n > len(text_ranking):
-        raise ValueError(f"Top-N이 후보 수보다 큽니다: {top_n}>{len(text_ranking)}")
+        raise ValueError(f"Top-N exceeds candidate count: {top_n}>{len(text_ranking)}")
 
     head = text_ranking[:top_n]
     tail = text_ranking[top_n:]
@@ -129,7 +124,7 @@ def rerank_text_top_n(
         (head_ids[index], float(fused_scores[index]))
         for index in order
     ]
-    # 평가 함수는 tail 점수를 사용하지 않으며, 원 T1 순서 보존을 위해 그대로 붙인다.
+    # Evaluation ignores tail scores; append the tail unchanged to preserve original T1 order.
     reranked_tail = [
         (patent_id, float(score))
         for patent_id, score in tail
@@ -179,19 +174,19 @@ def run_self_test() -> None:
     try:
         rerank_text_top_n(text, structure[:-1], 3, 0.5)
     except ValueError as exc:
-        assert "후보 집합" in str(exc)
+        assert "candidate set" in str(exc)
     else:
-        raise AssertionError("후보 집합 불일치가 감지되지 않았습니다")
+        raise AssertionError("Candidate-set mismatch was not detected")
     try:
         rerank_text_top_n(text, structure, 5, 0.5)
     except ValueError as exc:
-        assert "후보 수" in str(exc)
+        assert "candidate count" in str(exc)
     else:
-        raise AssertionError("후보 수보다 큰 Top-N이 감지되지 않았습니다")
+        raise AssertionError("Top-N exceeding candidate count was not detected")
     assert parse_top_n_values("500,100") == [100, 500]
     zero, collapsed = zscore_or_zero(np.asarray([1.0, 1.0]))
     assert collapsed and np.array_equal(zero, np.zeros(2))
-    print("자체 검증을 통과했습니다.")
+    print("Self-check passed.")
 
 
 def main() -> int:
@@ -240,18 +235,18 @@ def main() -> int:
     }
     missing_arguments = [name for name, value in required.items() if value is None]
     if missing_arguments:
-        parser.error(f"필수 인자가 없습니다: {', '.join(missing_arguments)}")
+        parser.error(f"Missing required arguments: {', '.join(missing_arguments)}")
     missing_files = [
         str(path)
         for name, path in required.items()
         if name != "--output-dir" and not path.is_file()
     ]
     if missing_files:
-        raise SystemExit(f"입력 파일이 없습니다: {missing_files}")
+        raise SystemExit(f"Input file missing: {missing_files}")
     if args.ranking_output_limit < 100:
-        parser.error("--ranking-output-limit은 100 이상이어야 합니다")
+        parser.error("--ranking-output-limit must be at least 100")
     if args.iterations < 1000:
-        parser.error("--iterations는 1000 이상이어야 합니다")
+        parser.error("--iterations must be at least 1000")
 
     started_at = time.perf_counter()
     ground_truth = load_ground_truth(args.ground_truth, args.conflict_field)
@@ -267,7 +262,7 @@ def main() -> int:
     )
     if len(structure_models) != 1:
         raise SystemExit(
-            f"reranking 1차 실험은 T2 모델 하나만 허용합니다: "
+            f"Initial reranking experiment allows only one T2 model: "
             f"{sorted(structure_models)}"
         )
     structure_model = next(iter(structure_models))
@@ -277,9 +272,9 @@ def main() -> int:
         "method",
     )
     if text_models != text_ranking_models:
-        raise SystemExit("T1 query 결과와 ranking의 source 집합이 다릅니다")
+        raise SystemExit("T1 query-result and ranking source sets differ")
     if structure_models != structure_ranking_models:
-        raise SystemExit("T2 query 결과와 ranking의 method 집합이 다릅니다")
+        raise SystemExit("T2 query-result and ranking method sets differ")
     require_full_score_rankings(text_per_query, text_rankings, text_models, "T1")
     require_full_score_rankings(
         structure_per_query,
@@ -293,11 +288,11 @@ def main() -> int:
         for ranking in text_rankings[model].values()
     }
     if len(candidate_counts) != 1:
-        raise SystemExit(f"T1 query별 후보 수가 다릅니다: {sorted(candidate_counts)}")
+        raise SystemExit(f"T1 candidate counts differ across queries: {sorted(candidate_counts)}")
     candidate_count = next(iter(candidate_counts))
     if max(args.top_n_values) > candidate_count:
         raise SystemExit(
-            f"Top-N이 후보 수보다 큽니다: "
+            f"Top-N exceeds candidate count: "
             f"{max(args.top_n_values)}>{candidate_count}"
         )
 
@@ -315,7 +310,7 @@ def main() -> int:
             structure_queries = set(structure_per_query[structure_model].get(task, {}))
             if text_queries != structure_queries:
                 raise SystemExit(
-                    f"T1과 T2의 평가 query 집합이 다릅니다: "
+                    f"T1/T2 evaluation query sets differ: "
                     f"source={text_model}, task={task}"
                 )
             assigned: set[str] = set()
@@ -411,7 +406,7 @@ def main() -> int:
                         gold = ground_truth[query_id][task]
                         if not gold:
                             raise SystemExit(
-                                f"평가 query의 gold가 비어 있습니다: {task}:{query_id}"
+                                f"Evaluation query has empty gold: {task}:{query_id}"
                             )
                         text_meta = text_per_query[text_model][task][query_id]
                         structure_meta = structure_per_query[structure_model][task][query_id]
@@ -419,7 +414,7 @@ def main() -> int:
                             text_meta["gold_count"] != len(gold)
                             or structure_meta["gold_count"] != len(gold)
                         ):
-                            raise SystemExit(f"gold 수가 입력과 다릅니다: {task}:{query_id}")
+                            raise SystemExit(f"Gold count differs from input: {task}:{query_id}")
                         try:
                             reranked, _, _ = rerank_text_top_n(
                                 text_rankings[text_model][query_id],
@@ -644,15 +639,15 @@ def main() -> int:
         "status": "completed",
         "method": "text_first_structure_weighted_reranking",
         "candidate_policy": (
-            "T1 Top-N 멤버십만 구조 점수 결합 대상으로 사용하고, "
-            "Top-N 밖 후보는 원 T1 순서와 위치를 유지"
+            "Fuse structure scores only within T1 Top-N membership; "
+            "retain original T1 order and positions outside Top-N"
         ),
         "score_definition": (
-            "Top-N 내부 alpha * z(T1 score) + (1 - alpha) * z(T2 score)"
+            "Within Top-N: alpha * z(T1 score) + (1 - alpha) * z(T2 score)"
         ),
-        "normalization_scope": "각 query와 Top-N 설정 내부",
+        "normalization_scope": "Within each query and Top-N setting",
         "top_n_values": args.top_n_values,
-        "top_n_selection_policy": "Top-N별 결과를 모두 보고하며 test 결과로 하나를 선택하지 않음",
+        "top_n_selection_policy": "Report all Top-N settings without choosing one by test results",
         "alpha_grid": args.alpha_grid,
         "alpha_selection": {
             "split": "development",
@@ -661,8 +656,8 @@ def main() -> int:
             "metric": PRIMARY_SELECTION_METRIC,
             "per_text_source_and_top_n": True,
             "tie_break_policy": (
-                "development MRR@100 동률이면 alpha=0.5에 가까운 값을 우선하고, "
-                "다시 동률이면 text 비중이 큰 alpha를 선택"
+                "For tied development MRR@100, prefer alpha nearest 0.5; "
+                "then prefer larger alpha (more text weight)"
             ),
             "selected_alphas": {
                 source: {str(top_n): alpha for top_n, alpha in values.items()}
@@ -671,7 +666,7 @@ def main() -> int:
             "test_labels_not_used_for_selection": True,
         },
         "zero_variance_policy": (
-            "Top-N 내부 점수 표준편차가 0이면 해당 모달리티 z-score를 0으로 처리"
+            "Zero within-Top-N score standard deviation gives zero modality z-scores"
         ),
         "zero_variance_development_query_counts": {
             source: {str(top_n): counts for top_n, counts in values.items()}
@@ -686,8 +681,8 @@ def main() -> int:
         },
         "minimum_inference_queries": MINIMUM_INFERENCE_QUERIES,
         "small_sample_policy": (
-            "test query가 30개 미만이면 평균과 win/tie/loss만 기록하고 "
-            "bootstrap CI와 p-value를 산출하지 않음"
+            "With fewer than 30 test queries, report only means and win/tie/loss, "
+            "without bootstrap CI or p-values"
         ),
         "text_sources": sorted(text_models),
         "structure_method": structure_model,
@@ -696,13 +691,13 @@ def main() -> int:
         "paired_inference": {
             "evaluation_split": "test only",
             "unit": "query",
-            "comparison": "각 reranking과 해당 T1 원본",
+            "comparison": "Each reranking versus its corresponding original T1",
             "bootstrap_iterations": args.iterations,
             "sign_flip_iterations": args.iterations,
             "seed": args.seed,
             "confidence_interval": "percentile paired bootstrap 95% CI",
             "multiple_comparison_policy": (
-                "task·metric별 T1 source와 Top-N 조합 전체에 Holm 보정"
+                "Holm correction over all T1-source/Top-N combinations per task/metric"
             ),
         },
         "ground_truth_field_mapping": {
@@ -710,8 +705,8 @@ def main() -> int:
             "Conflict-X": args.conflict_field,
         },
         "interpretation_limit": (
-            "현재 oracle-derived closed candidate pool의 운영형 모사 결과이며 "
-            "open-corpus 계산량 또는 일반화 성능의 실측치로 해석하지 않음"
+            "Operational simulation on the current oracle-derived closed candidate pool; "
+            "not measured open-corpus computation or generalization performance"
         ),
         "provenance": {
             "script_path": str(Path(__file__).resolve()),

@@ -108,3 +108,13 @@ also review remotes and download/share links. Publish tracked, reviewed files,
 not an unreviewed workstation folder. When making an archive, exclude operating-
 system extended attributes and user/group ownership metadata. A `.gitignore`
 rule does not remove files from an archive or from existing Git history.
+
+## Source language and compatibility
+
+Source comments, docstrings, command-line help, and diagnostic messages are in
+English. The legacy `effect_decomposition` JSON keys in
+`scripts/evaluation/evaluate_qdrant_retrieval.py` retain their original spelling
+for compatibility with saved reports and readers; their test references are
+preserved as well. They are schema identifiers, not user-facing descriptions.
+Do not translate experimental prompts, source-data values, parsing patterns,
+or existing result files as a documentation cleanup.

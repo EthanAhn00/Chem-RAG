@@ -1,13 +1,9 @@
-"""테스트 러너 - unit / integration / full-index 를 구분해 실행하고 집계한다.
-
-  unit         : DB 없이 실행
-  integration  : 임시 Qdrant 컬렉션을 직접 만들어 검색
-  full-index   : 실제 4,123 / 6,928 포인트 DB 필요 (scripts/qdrant/qdrant_verify_index.py)
-
-skip 된 테스트는 PASS로 세지 않는다. 실패나 에러가 있으면 종료 코드 1.
-
-    python3 tests/run_tests.py
-    python3 tests/run_tests.py --skip-full-index
+"""Test runner for unit, integration, and full-index checks.
+unit: no DB required.
+integration: create temporary Qdrant collections and perform retrieval.
+full-index: requires actual 4,123/6,928-point DB via qdrant_verify_index.py.
+Skipped tests do not count as PASS. Any failure/error exits 1.
+Usage: python3 tests/run_tests.py [--skip-full-index].
 """
 import os
 import sys
@@ -33,10 +29,10 @@ def run_module(mod_name, label):
             passed += 1
             print(f'  [PASS] {name} ({time.time()-t0:.1f}s)')
         except Exception as exc:
-            # 전제 조건 미충족은 SKIP, 그 외에는 FAIL
+            # Missing prerequisites mean SKIP; other exceptions mean FAIL.
             if isinstance(exc, FileNotFoundError):
                 skipped += 1
-                print(f'  [SKIP] {name} - 전제 데이터 없음: {exc}')
+                print(f'  [SKIP] {name} - prerequisite data missing: {exc}')
                 details.append({'test': name, 'status': 'SKIP', 'reason': str(exc)})
                 continue
             failed += 1
@@ -62,7 +58,7 @@ def main():
         full['skipped'] = 1
         full['details'].append({'test': 'qdrant_verify_index', 'status': 'SKIP',
                                 'reason': '--skip-full-index'})
-        print('\n===== full-index verification =====\n  [SKIP] --skip-full-index 지정됨')
+        print('\n===== full-index verification =====\n  [SKIP] --skip-full-index specified')
     else:
         print('\n===== full-index verification (scripts/qdrant/qdrant_verify_index.py) =====')
         proc = subprocess.run([sys.executable, os.path.join(ROOT, 'scripts', 'qdrant', 'qdrant_verify_index.py')],
@@ -70,7 +66,7 @@ def main():
         tail = [l for l in proc.stdout.splitlines() if l.strip()][-3:]
         for l in tail:
             print('  ' + l)
-        print(f'  종료 코드: {proc.returncode}')
+        print(f'  Exit code: {proc.returncode}')
         if proc.returncode == 0:
             full['passed'] = 1
             full['details'].append({'test': 'qdrant_verify_index', 'status': 'PASS'})
@@ -80,13 +76,13 @@ def main():
                                     'reason': (proc.stderr or proc.stdout)[-400:]})
     results.append(full)
 
-    print('\n================ 요약 ================')
+    print('\n================ Summary ================')
     tp = tf = ts = 0
     for r in results:
         print(f"  {r['suite']:26} pass={r['passed']:3} fail={r['failed']:3} skip={r['skipped']:3}")
         tp += r['passed']; tf += r['failed']; ts += r['skipped']
     print(f"  {'TOTAL':26} pass={tp:3} fail={tf:3} skip={ts:3}")
-    print('  (skip은 PASS에 포함되지 않음)')
+    print('  (skipped tests are not counted as PASS)')
     return 1 if tf else 0
 
 

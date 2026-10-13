@@ -1,19 +1,5 @@
-"""
-patent_content.claims_text가 비어있는 특허 중, claim_element에 이미 확보된 청구항
-텍스트가 있는 건을 찾아 재조립해서 채운다. db_export_4_ops_fulltext.py가 TARGET
-특허의 청구항을 claim_element로만 저장하고 patent_content.claims_text에는
-반영하지 않아서 생긴 공백을 메우는 작업.
-
-claim_element는 청구항 단위(claim_no)로 여러 element_text 조각을 갖고 있어서,
-같은 청구항의 조각을 element_no 순으로 합친 뒤 청구항 번호 순으로 이어 붙인다.
-
-이어서 실행할 스크립트 없음 (patent_content.csv를 그 자리에서 갱신).
-
-사용법 (맥 .venv):
-    python3 scripts/db_export/db_export_5_backfill_claims_text.py
-
-출력: data/db_export/patent_content.csv 갱신, coverage_report.json에
-      claims_text_backfill 요약 추가
+"""Backfill empty patent_content.claims_text from available claim_element text. db_export_4_ops_fulltext.py stores TARGET claims in claim_element but not patent_content.claims_text. Join fragments by element_no within claim_no, then join claims by claim number.
+Run python3 scripts/db_export/db_export_5_backfill_claims_text.py. Updates patent_content.csv in place and adds claims_text_backfill to coverage_report.json; no follow-up script is specified here.
 """
 import os
 import sys
@@ -42,8 +28,7 @@ def write_csv(name, fieldnames, rows):
 
 
 def build_claims_text(elements):
-    """같은 patent_id의 claim_element 행들을 claim_no/element_no 순으로 합쳐
-    하나의 청구항 전문 텍스트로 재구성한다."""
+    """Reconstruct full claims for one patent_id, ordered by claim_no/element_no."""
     by_claim = {}
     for el in elements:
         try:
@@ -98,14 +83,14 @@ def main():
         'filled_from_claim_element': len(filled),
         'still_empty': len(still_empty),
         'still_empty_ids': still_empty,
-        'note': 'claim_element는 OPS 전문 조회 대상(TARGET 특허)만 있어서, '
-                'PRIOR로만 등장한 특허는 claim_element도 없으면 채울 수 없음',
+        'note': 'claim_element covers OPS full-text TARGET patents; '
+                'PRIOR-only patents cannot be backfilled without claim_element rows',
     }
     with open(coverage_path, 'w', encoding='utf-8') as f:
         json.dump(coverage, f, indent=2, ensure_ascii=False)
 
-    print(f'claims_text 결측 {len(empty_before)}건 중 {len(filled)}건 채움, {len(still_empty)}건 여전히 결측')
-    print('여전히 결측:', still_empty)
+    print(f'Missing claims_text: {len(empty_before)}; populated {len(filled)} filled; {len(still_empty)} still missing')
+    print('Still missing:', still_empty)
 
 
 if __name__ == '__main__':

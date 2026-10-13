@@ -3,20 +3,18 @@ from collections import Counter
 from .chemical_tokenizer import ChemicalTokenizer
 
 class HybridChemicalRetriever:
-    """타깃 특허 청구항과 선행기술 청구항 간의 텍스트 유사도를 계산하는 검색기
+    """Lexical similarity between target and prior-art patent claims.
 
-    학습된 임베딩 모델(BERT 등)이 아닌, 화학 용어 토큰 단위의 Jaccard/overlap
-    집합 연산으로 점수를 매기는 어휘 기반(lexical) 유사도. B1(BM25)과 B2(임베딩)
-    사이에 위치하는 baseline 성격의 텍스트 축 구현
+    Uses Jaccard/overlap set operations on chemical-term tokens, not learned embeddings such as BERT. This is a baseline text component between B1 (BM25) and B2 (embeddings).
     """
 
     def __init__(self):
         self.tokenizer = ChemicalTokenizer()
 
     def compute_text_similarity(self, query_text, doc_text):
-        # Jaccard 유사도(|교집합|/|합집합|)와 길이 정규화 overlap 유사도
-        # (|교집합|/sqrt(길이곱), 코사인 유사도와 유사한 성격)를 0.5:0.5로 평균
-        # 두 지표를 함께 쓰는 이유: 어느 한쪽만 쓰면 텍스트 길이 편향이 생기기 쉬움
+        # Average Jaccard (intersection/union) and length-normalized overlap
+        # (intersection/sqrt(length product), similar to cosine) at 0.5:0.5.
+        # Combining both measures reduces the length bias of either alone.
         q_tokens = self.tokenizer.tokenize(query_text)
         d_tokens = self.tokenizer.tokenize(doc_text)
 

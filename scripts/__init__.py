@@ -1,1 +1,1 @@
-# scripts 모듈 초기화
+# Initialize the scripts package.

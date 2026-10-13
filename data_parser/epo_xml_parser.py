@@ -2,8 +2,7 @@ import os
 import re
 
 class EPOXMLParser:
-    """EPO 특허 XML 파일에서 도면 태그와 figure 메타데이터를 확인하기 위한 파서
-    <drawings> 블록을 추출하고 figure 이미지 존재 여부를 검증"""
+    """Parse drawing tags and figure metadata in EPO patent XML; extract <drawings> and check figure-image availability."""
 
     def __init__(self, xml_dir=None):
         if xml_dir is None:
@@ -19,7 +18,7 @@ class EPOXMLParser:
         self._build_xml_index()
 
     def _build_xml_index(self):
-        # 파일명과 EP 문서번호(예: 'EP3315022') 둘 다로 조회 가능하게 인덱싱
+        # Index by both filename and EP document number (e.g. 'EP3315022').
         if not os.path.exists(self.xml_dir):
             return
         files = [f for f in os.listdir(self.xml_dir) if f.endswith('.xml')]

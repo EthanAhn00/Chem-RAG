@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""T1 Qdrant에서 평가 단위별 후보 특허번호를 읽기 전용으로 추출한다.
-
-T2는 T1과 동일한 후보 코퍼스를 사용해야 한다. 이 스크립트는 지정한 컬렉션과
-``unit_type`` 조합별 특허번호 집합을 저장하고, 모든 조합에 공통으로 존재하는 후보와
-집합 차이를 manifest에 기록한다. Qdrant 컬렉션은 수정하지 않는다.
-"""
+"""Read-only export of candidate patent IDs from T1 Qdrant by evaluation unit. T2 must use the same candidate corpus. Save each collection/unit_type patent set and record common candidates/set differences in the manifest; never modify collections."""
 
 from __future__ import annotations
 
@@ -35,16 +30,16 @@ def write_patents(path: Path, patent_ids: set[str]) -> None:
 
 
 def parse_source(value: str) -> tuple[str, str, str]:
-    """``label=collection:unit_type`` 형식을 검사한다."""
+    """Validate label=collection:unit_type format."""
     try:
         label, remainder = value.split("=", 1)
         collection, unit_type = remainder.rsplit(":", 1)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(
-            "--source는 label=collection:unit_type 형식이어야 합니다"
+            "--source must use label=collection:unit_type format"
         ) from exc
     if not label.strip() or not collection.strip() or not unit_type.strip():
-        raise argparse.ArgumentTypeError("--source의 label, collection, unit_type은 비울 수 없습니다")
+        raise argparse.ArgumentTypeError("--source label, collection, and unit_type cannot be empty")
     return label.strip(), collection.strip(), unit_type.strip()
 
 
@@ -99,19 +94,19 @@ def main() -> int:
         type=parse_source,
         action="append",
         required=True,
-        help="label=collection:unit_type 형식, 반복 지정 가능",
+        help="label=collection:unit_type format; repeatable",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=2000)
     args = parser.parse_args()
 
     if not args.qdrant_path.is_dir():
-        raise SystemExit(f"Qdrant 경로가 없습니다: {args.qdrant_path}")
+        raise SystemExit(f"Qdrant path missing: {args.qdrant_path}")
     labels = [label for label, _, _ in args.source]
     if len(labels) != len(set(labels)):
-        parser.error("--source label은 중복될 수 없습니다")
+        parser.error("--source labels must be unique")
     if args.batch_size < 1:
-        parser.error("--batch-size는 1 이상이어야 합니다")
+        parser.error("--batch-size must be at least 1")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     client = QdrantClient(path=str(args.qdrant_path))
@@ -121,7 +116,7 @@ def main() -> int:
     source_stats: dict[str, dict[str, Any]] = {}
     for label, collection, unit_type in args.source:
         if collection not in available_collections:
-            raise SystemExit(f"Qdrant 컬렉션이 없습니다: {collection}")
+            raise SystemExit(f"Qdrant collection missing: {collection}")
         patents, stats = extract_patents(client, collection, unit_type, args.batch_size)
         patent_sets[label] = patents
         source_stats[label] = {
@@ -167,8 +162,8 @@ def main() -> int:
         "union_patent_count": len(union),
         "pairwise_differences": pairwise_differences,
         "output_policy": (
-            "T2는 비교할 T1 기준선과 동일한 source별 후보 파일을 사용한다. "
-            "모든 source가 동일할 때만 common 파일을 공통 후보 코퍼스로 사용한다."
+            "T2 uses the same source-specific candidate file as the compared T1 baseline. "
+            "Use the common candidate file only when all source sets are identical."
         ),
     }
     write_json(args.output_dir / "text_candidate_corpus_manifest.json", manifest)

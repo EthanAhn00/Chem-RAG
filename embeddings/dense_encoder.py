@@ -1,21 +1,10 @@
-"""Dense 인코더 백엔드.
+"""Dense encoder backends.
 
-네 가지를 제공한다.
-
-  static-vectors        GitHub 릴리스로 배포되는 사전학습 GloVe 단어 벡터를 IDF 가중 평균
-                        풀링해 문장 벡터를 만든다. numpy만 있으면 동작하고 어떤 파이썬
-                        버전에서도 쓸 수 있다. **실제 사전학습 분포 의미 벡터**지만
-                        transformer 문장 인코더는 아니다(보고 시 구분 필요).
-
-  hashing               - 외부 모델/네트워크 없이 동작하는 결정론적 해싱 인코더.
-                          의미(semantic) 임베딩이 아니라 어휘 신호를 고정 차원에
-                          투영한 것이므로 BM25와 비슷한 성격이다. 어떤 환경에서도
-                          파이프라인이 돌아가게 하는 기본값 겸 폴백.
-  fastembed             - ONNX 기반 실제 문장 임베딩 모델(BAAI/bge-small-en-v1.5 등).
-  sentence-transformers - torch 기반 문장 임베딩 모델.
-
-주의: 결과 파일에는 항상 어떤 백엔드로 만든 수치인지 기록한다. hashing 백엔드로
-낸 dense 점수를 '의미 기반 임베딩 성능'이라고 해석하면 안 된다.
+static-vectors: IDF-weighted mean pooling of pretrained GloVe word vectors from GitHub releases. Requires only numpy and supports varied Python environments. These are pretrained distributional vectors, not transformer sentence embeddings; distinguish them when reporting.
+hashing: deterministic lexical projection without external models/network access. Not semantic embeddings; similar in role to BM25. A default/fallback for restricted environments.
+fastembed: ONNX sentence embeddings, e.g. BAAI/bge-small-en-v1.5.
+sentence-transformers: torch sentence embeddings.
+Always record the backend in results. Never interpret hashing-based dense scores as semantic-embedding performance.
 """
 import hashlib
 import json
@@ -35,16 +24,12 @@ def tokenize(text):
 
 
 def _stable_hash(token, salt=b''):
-    """PYTHONHASHSEED에 영향받지 않는 결정론적 해시."""
+    """Deterministic hash unaffected by PYTHONHASHSEED."""
     return int.from_bytes(hashlib.blake2b(token.encode('utf-8'), digest_size=8, key=salt).digest(), 'big')
 
 
 class HashingDenseEncoder(DenseEncoder):
-    """부호 해싱(signed hashing) + log-tf 가중 + L2 정규화.
-
-    - 같은 텍스트는 어떤 머신/프로세스에서든 같은 벡터를 만든다.
-    - 모델 다운로드가 필요 없어 오프라인/제한된 파이썬 버전에서도 동작한다.
-    """
+    """Signed hashing with log-tf weighting and L2 normalization. Identical text yields identical vectors across machines/processes. Requires no model download and works offline or with restricted Python versions."""
 
     name = 'hashing'
 
@@ -78,7 +63,7 @@ class HashingDenseEncoder(DenseEncoder):
 
 
 class FastEmbedDenseEncoder(DenseEncoder):
-    """fastembed(ONNX) 기반 실제 문장 임베딩."""
+    """Sentence embeddings using fastembed (ONNX)."""
 
     name = 'fastembed'
 
@@ -104,7 +89,7 @@ class FastEmbedDenseEncoder(DenseEncoder):
 
 
 class SentenceTransformerDenseEncoder(DenseEncoder):
-    """sentence-transformers(torch) 기반 문장 임베딩."""
+    """Sentence embeddings using sentence-transformers (torch)."""
 
     name = 'sentence-transformers'
 
@@ -126,13 +111,12 @@ class SentenceTransformerDenseEncoder(DenseEncoder):
 
 
 class StaticVectorDenseEncoder(DenseEncoder):
-    """사전학습 정적 단어 벡터(GloVe)의 IDF 가중 평균 풀링.
-
-    - scripts/qdrant_fetch_dense_model.py 가 만든 .npz(단어 + 벡터)를 읽는다.
-    - 토크나이저는 BM25와 동일한 ChemicalTokenizer를 써서 어휘 처리 기준을 맞춘다.
-    - 가중치: IDF(BM25 학습 상태) x (1 + log tf). IDF 상태가 없으면 균등 가중(로그에 명시).
-    - 출력은 L2 정규화되어 cosine 거리와 맞는다.
-    - OOV(사전에 없는 토큰) 비율을 추적해 품질 판단 근거로 남긴다.
+    """IDF-weighted mean pooling of pretrained static GloVe word vectors.
+    - Read the word/vector .npz produced by scripts/qdrant_fetch_dense_model.py.
+    - Reuse ChemicalTokenizer to match BM25 lexical processing.
+    - Weight by BM25 IDF x (1 + log tf); use uniform weights without IDF state and log that choice.
+    - L2-normalize output for cosine distance.
+    - Track out-of-vocabulary token ratios for quality diagnostics.
     """
 
     name = 'static-vectors'
@@ -142,7 +126,7 @@ class StaticVectorDenseEncoder(DenseEncoder):
         self._np = np
         if not os.path.exists(npz_path):
             raise FileNotFoundError(
-                f'{npz_path} 가 없습니다. 먼저 scripts/qdrant_fetch_dense_model.py 를 실행하세요.')
+                f'{npz_path} is missing. Run scripts/qdrant_fetch_dense_model.py first.')
         data = np.load(npz_path, allow_pickle=True)
         words = [str(w) for w in data['words']]
         self._matrix = np.asarray(data['vectors'], dtype=np.float32)
@@ -182,8 +166,8 @@ class StaticVectorDenseEncoder(DenseEncoder):
                 if not b:
                     break
                 h.update(b)
-        # IDF 가중치가 다르면 같은 벡터 파일이라도 결과 벡터가 달라지므로 서명에 포함한다
-        # (필드별 BM25 상태를 쓰기 때문에 claims / title_claims 서명이 달라야 한다)
+        # Different IDF weights produce different vectors even with the same vector file; include them in the signature.
+        # Field-specific BM25 states require different claims / title_claims signatures.
         idf_sig = 'none'
         if self._idf:
             ih = hashlib.sha256()
@@ -194,7 +178,7 @@ class StaticVectorDenseEncoder(DenseEncoder):
                 f'src:{os.path.basename(self._idf_source or "")}']
 
     def encode(self, texts, token_lists=None):
-        """token_lists를 주면 재토큰화하지 않는다(색인 시 토큰화 중복 제거용)."""
+        """Use supplied token_lists without retokenizing, avoiding duplicate tokenization during indexing."""
         np = self._np
         out = []
         for i, text in enumerate(texts):

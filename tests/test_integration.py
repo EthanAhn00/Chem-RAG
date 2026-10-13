@@ -1,9 +1,5 @@
-"""통합 테스트 - 전용 테스트 컬렉션을 직접 만들고 실제로 검색한다.
-
-프로덕션 컬렉션에 의존하지 않는다(임시 저장소에 자체 데이터를 넣고 검증).
-따라서 색인이 없다는 이유로 skip 되지 않는다.
-
-    python3 tests/test_integration.py
+"""Integration tests create temporary collections and perform actual retrieval. They use fixture data in temporary storage, not production collections, and therefore do not skip merely because a production index is absent.
+Usage: python3 tests/test_integration.py.
 """
 import os
 import sys
@@ -40,15 +36,15 @@ FIXTURES = [
 
 def _build(tmpdir):
     settings = load_settings()
-    settings.url = ''                       # 통합 테스트는 항상 임시 로컬 저장소 사용
+    settings.url = ''                       # Integration tests always use temporary local storage.
     settings.local_path = tmpdir
     settings.patents_collection = 'test_patents_integration'
     settings.structures_collection = 'test_structures_integration'
-    settings.dense_backend = 'hashing'      # 모델 파일 없이도 도는 결정론적 인코더
+    settings.dense_backend = 'hashing'      # Deterministic encoder without model files.
     settings.dense_dim = 64
 
     ok, detail = check_local_storage_writable(tmpdir)
-    assert ok, f'임시 저장소 사용 불가: {detail}'
+    assert ok, f'Temporary storage unavailable: {detail}'
 
     dense = HashingDenseEncoder(dim=64)
     texts = {f: [] for f in TEXT_FIELDS}
@@ -74,7 +70,7 @@ def _build(tmpdir):
                      'pub_date': pub, 'app_date': app,
                      'pub_date_int': int(pub) if pub else None,
                      'family_id': fam, 'role': 'corpus', 'split': 'train',
-                     # 검색 CLI의 서명 검사가 실제 색인과 같은 형태의 payload를 보게 한다
+                     # Give CLI signature checks the same payload shape used by actual indexing.
                      'embedding_signature_by_field': {f: dense.signature() for f in TEXT_FIELDS}}))
     client.upsert(settings.patents_collection, points=points, wait=True)
     return settings, client, PatentRetriever(client, settings,
@@ -87,10 +83,10 @@ def test_integration_search_modes_and_filters():
         settings, client, retriever = _build(tmp)
         assert client.count(settings.patents_collection).count == len(FIXTURES)
 
-        # 필터 없는 검색은 차단
+        # Unfiltered retrieval must be blocked.
         try:
             retriever.search_dense('x', None)
-            raise AssertionError('무필터 검색이 차단되지 않음')
+            raise AssertionError('Unfiltered retrieval was not blocked')
         except ValueError:
             pass
 
@@ -107,13 +103,13 @@ def test_integration_search_modes_and_filters():
                     violations['family'] += 1
                 if 'FUTURE' in ids:
                     violations['future'] += 1
-                # 경계조건: pub_date == app_date 인 문서는 포함되어야 한다
-                assert 'EQUAL_DATE' in ids, f'{mode}/{field}: 동일 날짜 문서가 제외됨'
-                # pub_date 가 없는 문서는 시간 조건으로 배제하지 않는다
-                assert 'NO_DATE' in ids, f'{mode}/{field}: pub_date 없는 문서가 제외됨'
+                # Equality boundary: pub_date == app_date must be included.
+                assert 'EQUAL_DATE' in ids, f'{mode}/{field}: equal-date document was excluded'
+                # Missing pub_date must not be excluded by time filtering.
+                assert 'NO_DATE' in ids, f'{mode}/{field}: document with missing pub_date was excluded'
         assert violations == {'self': 0, 'family': 0, 'future': 0}, violations
 
-        # 멱등성: 같은 포인트 재적재 후에도 개수 불변
+        # Idempotence: re-upserting identical points preserves count.
         pts = list(client.scroll(settings.patents_collection, limit=10,
                                  with_payload=True, with_vectors=True)[0])
         before = client.count(settings.patents_collection).count
@@ -121,16 +117,16 @@ def test_integration_search_modes_and_filters():
             models.PointStruct(id=p.id, vector=p.vector, payload=p.payload) for p in pts], wait=True)
         assert client.count(settings.patents_collection).count == before
 
-        # 관련 문서가 무관 문서보다 위에 오는지(랭킹이 실제로 동작하는지).
-        # BM25는 질의어와 겹치는 토큰이 하나도 없는 문서(UNRELATED)를 아예 반환하지 않는다.
-        # 따라서 '없거나, 있더라도 더 아래'를 요구한다.
+        # Verify relevant documents outrank unrelated ones.
+        # BM25 omits documents with zero query-token overlap (UNRELATED),
+        # so require either absence or a lower rank.
         hits, _ = retriever.search('bm25', 'ethylene polymer catalyst composition', pf,
                                    limit=10, field='claims')
         ids = [h['patent_id'] for h in hits]
         assert 'OLD_HIT' in ids, ids
         assert ('UNRELATED' not in ids) or (ids.index('OLD_HIT') < ids.index('UNRELATED')), ids
 
-        # dense는 모든 문서에 점수를 주므로 무관 문서도 반환되지만 더 아래여야 한다
+        # Dense retrieval scores all documents, but unrelated documents must rank lower.
         dhits, _ = retriever.search('dense', 'ethylene polymer catalyst composition', pf,
                                     limit=10, field='claims')
         dids = [h['patent_id'] for h in dhits]
@@ -141,20 +137,10 @@ def test_integration_search_modes_and_filters():
 
 
 def test_integration_snapshot_roundtrip():
-    """export -> 완전히 별개인 두 번째 임시 저장소로 실제 restore -> 원본과 비교 ->
-    복원본에서 검색까지 실행한다(단순히 gzip을 읽기만 하는 게 아니라
-    qdrant_engine.snapshot.restore_snapshot()을 실제로 호출).
-
-    비교 범위(전부 실제로 비교한 것만 "완전 일치"라고 표현한다):
-      특허 컬렉션 - 포인트 수, 전체 point ID, 전체 payload, claims_dense/title_claims_dense
-        (float32 허용오차), claims_bm25/title_claims_bm25(sparse indices/values/길이/이름)
-      구조 컬렉션 - 포인트 수, 전체 point ID, 전체 payload, morgan_ecfp4_2048(sparse 완전 일치)
-      payload 인덱스 - 로컬 임베디드 모드 기대값(no_effect_local_mode)
-      alias - 실제 재조회한 verified_target_matches
-      대표 검색 - claims BM25/dense, title_claims BM25/dense, 필터 적용 검색,
-        구조 fingerprint 후보 검색(approximate_candidates)
-    서버가 없는 이 테스트는 로컬 모드 기대값만 검사한다. 서버 전용 검증은
-    이 파일의 별도 서버 통합 테스트(SKIP 사유 명시)가 맡는다."""
+    """Export, restore into a separate temporary store, compare with the original, and execute searches on the restored DB via qdrant_engine.snapshot.restore_snapshot(), not merely gzip reading.
+    Check patent counts, all point IDs/payloads, claims_dense/title_claims_dense within float32 tolerance, and exact claims_bm25/title_claims_bm25 sparse indexes/values/lengths/names. Check structure counts/IDs/payloads and exact morgan_ecfp4_2048 sparse vectors.
+    Verify local index no_effect_local_mode, re-read alias verified_target_matches, and representative claims/title_claims BM25/dense/filter searches plus approximate_candidates structure retrieval. This test covers local expectations only; separate server tests explicitly report skipped prerequisites.
+    """
     from qdrant_engine.snapshot import export_collection, write_manifest, restore_snapshot
     from qdrant_engine.client import ensure_alias
     from qdrant_engine.structure_repository import StructureRepository
@@ -175,12 +161,12 @@ def test_integration_snapshot_roundtrip():
                                    alias='test_structures_alias')
         assert meta_p['points'] == len(FIXTURES) and meta_s['points'] == len(struct_rows)
         assert len(meta_p['archive_sha256']) == 64 and len(meta_p['content_sha256']) == 64
-        assert meta_p['payload_indexes'], 'patents role은 payload_indexes가 채워져야 한다'
-        assert meta_s['payload_indexes'], 'structures role은 payload_indexes가 채워져야 한다'
+        assert meta_p['payload_indexes'], 'patents role must populate payload_indexes'
+        assert meta_s['payload_indexes'], 'structures role must populate payload_indexes'
         mpath, manifest = write_manifest(out, [meta_p, meta_s], settings1, 'test')
         assert manifest['manifest_version'] == 2
 
-        # 원본 전체 포인트(payload + 모든 벡터) - 특허/구조 둘 다
+        # All original points, including complete payloads/vectors for patents and structures.
         orig_patent_points, _ = client1.scroll(settings1.patents_collection, limit=100,
                                                with_payload=True, with_vectors=True)
         orig_patent_by_id = {str(p.id): p for p in orig_patent_points}
@@ -203,14 +189,14 @@ def test_integration_snapshot_roundtrip():
         assert report['restore_mode'] == 'local_embedded', report['restore_mode']
         for c in report['collections']:
             assert c['points_match'] and c['point_id_set_match'] and c['vector_schema_match']
-            # 로컬 임베디드 모드 기대값: payload 인덱스는 no_effect_local_mode(실패 아님)
+            # Embedded payload indexes are no_effect_local_mode, not failure.
             assert not c['payload_indexes']['failed'], c['payload_indexes']
             assert c['payload_indexes_ok'], c['payload_indexes']
-            # alias: 실제 재조회 결과가 대상 컬렉션과 일치해야 한다(API 호출 성공만으로 판정하지 않음)
+            # Verify alias targets by re-query, not just API success.
             assert c['alias']['status'] == 'created', c['alias']
             assert c['alias']['verified_exists'] is True and c['alias']['verified_target_matches'] is True, c['alias']
             assert c['alias_ok']
-            # 대표 검색이 실제로 실행 가능했는지(verify_search 기본값 True로 호출했으므로)
+            # Verify representative search execution with default verify_search=True.
             assert c['representative_search_ok'], c.get('representative_search')
 
         claims_dense_vn = TEXT_FIELDS['claims']['dense']
@@ -224,7 +210,7 @@ def test_integration_snapshot_roundtrip():
             assert all(abs(a - b) < 1e-6 for a, b in zip(ov.values, rv.values)), \
                 (label, 'values', ov.values, rv.values)
 
-        # --- 특허 컬렉션: 전체 point ID + payload + dense(허용오차) + sparse(완전 일치) ---
+        # --- Patents: all IDs/payloads, tolerant dense, exact sparse vectors ---
         restored_patent_points, _ = client2.scroll(settings2.patents_collection, limit=100,
                                                     with_payload=True, with_vectors=True)
         assert len(restored_patent_points) == len(orig_patent_by_id)
@@ -235,13 +221,13 @@ def test_integration_snapshot_roundtrip():
             for vn in (claims_dense_vn, title_dense_vn):
                 ov, rv = list(op.vector[vn]), list(rp.vector[vn])
                 assert len(ov) == len(rv), vn
-                # float32 저장소를 한 번 더 거치면 소수 7째 자리 수준의 반올림 차이가 생길 수 있어
-                # 정확히 같음이 아니라 float32 정밀도(1e-6) 이내 근접을 요구한다.
+                # Another float32 storage round trip can cause rounding near the 7th decimal;
+                # require closeness within 1e-6, not exact floating-point equality.
                 assert all(abs(a - b) < 1e-6 for a, b in zip(ov, rv)), (vn, ov, rv)
             for vn in (claims_bm25_vn, title_bm25_vn):
                 _assert_sparse_equal(op.vector[vn], rp.vector[vn], vn)
 
-        # --- 구조 컬렉션: 전체 point ID + payload + fingerprint sparse(완전 일치) ---
+        # --- Structures: all IDs/payloads and exact sparse fingerprints ---
         restored_struct_points, _ = client2.scroll(settings2.structures_collection, limit=100,
                                                     with_payload=True, with_vectors=True)
         assert len(restored_struct_points) == len(orig_struct_by_id)
@@ -252,7 +238,7 @@ def test_integration_snapshot_roundtrip():
             assert rp.payload == op.payload, (rp.id, rp.payload, op.payload)
             _assert_sparse_equal(op.vector[fp_vn], rp.vector[fp_vn], fp_vn)
 
-        # --- 복원본에서 대표 검색(claims/title_claims x BM25/dense) + 필터 적용 확인 ---
+        # --- Restored claims/title_claims x BM25/dense searches with filters ---
         dense = HashingDenseEncoder(dim=64)
         retriever2 = PatentRetriever(client2, settings2,
                                      {f: dense for f in TEXT_FIELDS}, retriever1.sparse_encoders)
@@ -266,7 +252,7 @@ def test_integration_snapshot_roundtrip():
                     (mode, field, ids)
                 assert 'OLD_HIT' in ids, (mode, field, ids)
 
-        # --- 구조 fingerprint 후보 검색(approximate_candidates) - 복원본 대상 ---
+        # --- approximate_candidates fingerprint search on restored storage ---
         struct_repo2 = StructureRepository(client2, settings2)
         candidates = struct_repo2.approximate_candidates('CCO', limit=10)
         cand_ids = {(c['patent_id'], c['mol_id']) for c in candidates}
@@ -283,7 +269,7 @@ def test_integration_snapshot_roundtrip():
 
 
 def _make_snapshot_fixture(out_dir):
-    """변조 테스트용 - fixture 특허 컬렉션 하나를 export하고 (out_dir, manifest_path) 반환."""
+    """Export one fixture patent collection for tampering tests; return (out_dir, manifest_path)."""
     from qdrant_engine.snapshot import export_collection, write_manifest
     tmp = tempfile.mkdtemp(prefix='chemrag_it_tamper_src_')
     settings, client, _ = _build(tmp)
@@ -297,8 +283,7 @@ def _make_snapshot_fixture(out_dir):
 
 
 def _restore_target(prepopulate=True):
-    """변조 테스트의 복원 대상 저장소. prepopulate=True면 기존 데이터를 넣어두고
-    반환값으로 '복원 실패 후에도 그대로인지' 확인할 수 있게 한다."""
+    """Restore target for tampering tests. prepopulate=True inserts existing data so it can be checked unchanged after failure."""
     tmp = tempfile.mkdtemp(prefix='chemrag_it_tamper_dst_')
     settings = load_settings()
     settings.url = ''
@@ -321,14 +306,14 @@ def _restore_target(prepopulate=True):
 
 def _assert_target_untouched(client, settings, sentinel_payload):
     from qdrant_engine.client import collection_exists
-    assert collection_exists(client, settings.patents_collection), '기존 컬렉션이 사라짐'
+    assert collection_exists(client, settings.patents_collection), 'Existing collection disappeared'
     assert client.count(settings.patents_collection).count == 1
     pts, _ = client.scroll(settings.patents_collection, limit=1, with_payload=True)
-    assert pts[0].payload == sentinel_payload, '기존 컬렉션 내용이 변경됨'
+    assert pts[0].payload == sentinel_payload, 'Existing collection contents changed'
 
 
 def test_integration_snapshot_restore_rejects_tampered_archive():
-    """(1) 파일 일부 변조 - archive_sha256 불일치 -> 중단, 기존 컬렉션 보존."""
+    """(1) Alter archive bytes: archive_sha256 mismatch must stop restore and preserve existing collections."""
     from qdrant_engine.snapshot import restore_snapshot, SnapshotIntegrityError
     out = tempfile.mkdtemp(prefix='chemrag_it_tamper_out_')
     dst_tmp = None
@@ -338,14 +323,14 @@ def test_integration_snapshot_restore_rejects_tampered_archive():
             f.seek(10)
             b = f.read(1)
             f.seek(10)
-            f.write(bytes([b[0] ^ 0xFF]))   # 압축 바이트 하나를 뒤집는다
+            f.write(bytes([b[0] ^ 0xFF]))   # Flip one compressed byte.
 
         dst_tmp, dst_settings, dst_client, sentinel = _restore_target()
         try:
             restore_snapshot(out, dst_settings, dst_client, recreate=True)
-            raise AssertionError('변조된 archive인데 복원이 성공함')
+            raise AssertionError('Restore succeeded despite altered archive bytes')
         except SnapshotIntegrityError as exc:
-            assert 'archive_sha256' in str(exc) or 'gzip' in str(exc) or '변조' in str(exc), exc
+            assert 'archive_sha256' in str(exc) or 'gzip' in str(exc) or 'altered' in str(exc), exc
         _assert_target_untouched(dst_client, dst_settings, sentinel)
         dst_client.close()
     finally:
@@ -355,8 +340,7 @@ def test_integration_snapshot_restore_rejects_tampered_archive():
 
 
 def test_integration_snapshot_restore_rejects_same_length_content_tamper():
-    """(2) 내용은 바뀌었지만 행 수는 같은 변조 - content_sha256이 archive_sha256과
-    별개로 이를 잡아내는지 확인(공격자가 archive_sha256만 재계산해도 여전히 걸림)."""
+    """(2) Change content while retaining row count. content_sha256 must detect it independently of archive_sha256, even if an attacker recomputes the latter."""
     from qdrant_engine.snapshot import restore_snapshot, SnapshotIntegrityError, sha256_file
     out = tempfile.mkdtemp(prefix='chemrag_it_tamper_out_')
     dst_tmp = None
@@ -370,8 +354,8 @@ def test_integration_snapshot_restore_rejects_same_length_content_tamper():
         lines[0] = json.dumps(rec, ensure_ascii=False) + '\n'
         with gzip.open(archive_path, 'wt', encoding='utf-8') as f:
             f.writelines(lines)
-        # 공격자가 archive_sha256/크기는 새로 계산해 manifest에 반영했다고 가정
-        # (그래도 content_sha256이 예전 값이라 걸려야 한다)
+        # Assume an attacker updates archive_sha256 and size in the manifest;
+        # the unchanged content_sha256 must still detect alteration.
         manifest['collections'][0]['archive_sha256'] = sha256_file(archive_path)
         manifest['collections'][0]['archive_bytes'] = os.path.getsize(archive_path)
         with open(mpath, 'w', encoding='utf-8') as f:
@@ -380,7 +364,7 @@ def test_integration_snapshot_restore_rejects_same_length_content_tamper():
         dst_tmp, dst_settings, dst_client, sentinel = _restore_target()
         try:
             restore_snapshot(out, dst_settings, dst_client, recreate=True)
-            raise AssertionError('내용이 바뀌었는데(행 수 동일) 복원이 성공함')
+            raise AssertionError('Restore succeeded after content changed with the same row count')
         except SnapshotIntegrityError as exc:
             assert 'content_sha256' in str(exc), exc
         _assert_target_untouched(dst_client, dst_settings, sentinel)
@@ -392,7 +376,7 @@ def test_integration_snapshot_restore_rejects_same_length_content_tamper():
 
 
 def test_integration_snapshot_restore_rejects_point_count_tamper():
-    """(3) manifest의 포인트 수 변조 - 파일은 그대로인데 manifest.points만 조작."""
+    """(3) Alter manifest.points while leaving the file unchanged."""
     from qdrant_engine.snapshot import restore_snapshot, SnapshotIntegrityError
     out = tempfile.mkdtemp(prefix='chemrag_it_tamper_out_')
     dst_tmp = None
@@ -405,9 +389,9 @@ def test_integration_snapshot_restore_rejects_point_count_tamper():
         dst_tmp, dst_settings, dst_client, sentinel = _restore_target()
         try:
             restore_snapshot(out, dst_settings, dst_client, recreate=True)
-            raise AssertionError('포인트 수가 조작됐는데 복원이 성공함')
+            raise AssertionError('Restore succeeded despite altered point count')
         except SnapshotIntegrityError as exc:
-            assert '줄 수' in str(exc) or 'points' in str(exc), exc
+            assert 'line count' in str(exc) or 'points' in str(exc), exc
         _assert_target_untouched(dst_client, dst_settings, sentinel)
         dst_client.close()
     finally:
@@ -417,7 +401,7 @@ def test_integration_snapshot_restore_rejects_point_count_tamper():
 
 
 def test_integration_snapshot_restore_rejects_dimension_tamper():
-    """(4) manifest의 vector dimension 변조 - 실제 벡터 길이와 선언이 달라지면 잡아야 한다."""
+    """(4) Alter manifest vector dimension; detect disagreement with actual vector lengths."""
     from qdrant_engine.snapshot import restore_snapshot, SnapshotIntegrityError
     out = tempfile.mkdtemp(prefix='chemrag_it_tamper_out_')
     dst_tmp = None
@@ -431,9 +415,9 @@ def test_integration_snapshot_restore_rejects_dimension_tamper():
         dst_tmp, dst_settings, dst_client, sentinel = _restore_target()
         try:
             restore_snapshot(out, dst_settings, dst_client, recreate=True)
-            raise AssertionError('vector dimension이 조작됐는데 복원이 성공함')
+            raise AssertionError('Restore succeeded despite altered vector dimension')
         except SnapshotIntegrityError as exc:
-            assert '벡터 길이' in str(exc) or 'dimension' in str(exc) or 'content_sha256' in str(exc), exc
+            assert 'vector lengths' in str(exc) or 'dimension' in str(exc) or 'content_sha256' in str(exc), exc
         _assert_target_untouched(dst_client, dst_settings, sentinel)
         dst_client.close()
     finally:
@@ -443,7 +427,7 @@ def test_integration_snapshot_restore_rejects_dimension_tamper():
 
 
 def test_integration_snapshot_restore_rejects_missing_file():
-    """(5) 파일 누락."""
+    """(5) Missing file."""
     from qdrant_engine.snapshot import restore_snapshot, SnapshotIntegrityError
     out = tempfile.mkdtemp(prefix='chemrag_it_tamper_out_')
     dst_tmp = None
@@ -454,9 +438,9 @@ def test_integration_snapshot_restore_rejects_missing_file():
         dst_tmp, dst_settings, dst_client, sentinel = _restore_target()
         try:
             restore_snapshot(out, dst_settings, dst_client, recreate=True)
-            raise AssertionError('파일이 없는데 복원이 성공함')
+            raise AssertionError('Restore succeeded despite a missing file')
         except SnapshotIntegrityError as exc:
-            assert '파일 없음' in str(exc), exc
+            assert 'file missing' in str(exc), exc
         _assert_target_untouched(dst_client, dst_settings, sentinel)
         dst_client.close()
     finally:
@@ -466,7 +450,7 @@ def test_integration_snapshot_restore_rejects_missing_file():
 
 
 def test_integration_snapshot_restore_rejects_malformed_manifest():
-    """manifest 구조 자체가 깨진 경우(필수 키 누락) - 파일 읽기 전에 걸려야 한다."""
+    """Malformed manifest structure/missing required keys must be rejected before reading files."""
     from qdrant_engine.snapshot import restore_snapshot, SnapshotIntegrityError
     out = tempfile.mkdtemp(prefix='chemrag_it_tamper_out_')
     dst_tmp = None
@@ -479,9 +463,9 @@ def test_integration_snapshot_restore_rejects_malformed_manifest():
         dst_tmp, dst_settings, dst_client, sentinel = _restore_target()
         try:
             restore_snapshot(out, dst_settings, dst_client, recreate=True)
-            raise AssertionError('manifest 구조가 깨졌는데 복원이 성공함')
+            raise AssertionError('Restore succeeded despite malformed manifest structure')
         except SnapshotIntegrityError as exc:
-            assert 'manifest 구조' in str(exc), exc
+            assert 'Manifest structure' in str(exc), exc
         _assert_target_untouched(dst_client, dst_settings, sentinel)
         dst_client.close()
     finally:
@@ -491,8 +475,7 @@ def test_integration_snapshot_restore_rejects_malformed_manifest():
 
 
 def test_integration_snapshot_restore_rejects_v2_required_field_deletion():
-    """v2 manifest에서 archive_sha256/content_sha256/archive_bytes 중 하나를 지우면
-    (예전에는 이렇게 하면 검증을 그냥 통과했던 취약점) 복원이 거부되고 기존 컬렉션은 보존돼야 한다."""
+    """Removing any v2 archive_sha256/content_sha256/archive_bytes field must reject restore and preserve existing collections, guarding against a previous validation-bypass vulnerability."""
     from qdrant_engine.snapshot import restore_snapshot, SnapshotIntegrityError
     for field_to_delete in ('archive_sha256', 'content_sha256', 'archive_bytes'):
         out = tempfile.mkdtemp(prefix='chemrag_it_v2field_out_')
@@ -507,9 +490,9 @@ def test_integration_snapshot_restore_rejects_v2_required_field_deletion():
             dst_tmp, dst_settings, dst_client, sentinel = _restore_target()
             try:
                 restore_snapshot(out, dst_settings, dst_client, recreate=True)
-                raise AssertionError(f'{field_to_delete} 를 지웠는데 v2 복원이 성공함')
+                raise AssertionError(f'{field_to_delete} removed but v2 restore succeeded')
             except SnapshotIntegrityError as exc:
-                assert field_to_delete in str(exc) or '필수 필드' in str(exc), (field_to_delete, exc)
+                assert field_to_delete in str(exc) or 'required fields' in str(exc), (field_to_delete, exc)
             _assert_target_untouched(dst_client, dst_settings, sentinel)
             dst_client.close()
         finally:
@@ -519,8 +502,7 @@ def test_integration_snapshot_restore_rejects_v2_required_field_deletion():
 
 
 def test_integration_snapshot_restore_rejects_path_traversal_file():
-    """manifest.collections[i].file 이 스냅샷 디렉토리 밖(절대경로/../)을 가리키면
-    파일을 열어보기도 전에 거부되고 기존 컬렉션은 보존돼야 한다."""
+    """Reject manifest.collections[i].file absolute/../ paths outside the snapshot directory before opening files, preserving existing collections."""
     from qdrant_engine.snapshot import restore_snapshot, SnapshotIntegrityError
     for bad_file in ('/etc/passwd', '../../etc/passwd'):
         out = tempfile.mkdtemp(prefix='chemrag_it_traversal_out_')
@@ -534,9 +516,9 @@ def test_integration_snapshot_restore_rejects_path_traversal_file():
             dst_tmp, dst_settings, dst_client, sentinel = _restore_target()
             try:
                 restore_snapshot(out, dst_settings, dst_client, recreate=True)
-                raise AssertionError(f'file={bad_file!r} 인데 복원이 성공함')
+                raise AssertionError(f'file={bad_file!r} but restore succeeded')
             except SnapshotIntegrityError as exc:
-                assert '경로' in str(exc), exc
+                assert 'path' in str(exc), exc
             _assert_target_untouched(dst_client, dst_settings, sentinel)
             dst_client.close()
         finally:
@@ -546,12 +528,12 @@ def test_integration_snapshot_restore_rejects_path_traversal_file():
 
 
 def _add_structures(client, settings, rows):
-    """(patent_id, mol_id, smiles) 목록을 테스트용 구조 컬렉션에 적재."""
+    """Load fixture (patent_id, mol_id, smiles) entries into a test structure collection."""
     ensure_structure_collection(client, settings, recreate=True)
     points = []
     for pid, mol_id, smi in rows:
         bits = morgan_bits(smi, settings.morgan_radius, settings.morgan_nbits)
-        assert bits, f'{smi} 지문 생성 실패'
+        assert bits, f'{smi} fingerprint generation failed'
         points.append(models.PointStruct(
             id=structure_point_id(pid, mol_id),
             vector={settings.fingerprint_vector_name:
@@ -561,7 +543,7 @@ def _add_structures(client, settings, rows):
 
 
 def test_integration_search_cli_field_routing_signature_and_rerank():
-    """검색 CLI 경로: --field 반영 / 서명 불일치 차단 / 구조 rerank / 필터 유지."""
+    """Search CLI: field selection, signature mismatch rejection, structure reranking, and filter preservation."""
     from scripts.qdrant import qdrant_search as qs
 
     tmp = tempfile.mkdtemp(prefix='chemrag_it_cli_')
@@ -569,38 +551,38 @@ def test_integration_search_cli_field_routing_signature_and_rerank():
         settings, client, retriever = _build(tmp)
         pf = build_prior_art_filter('Q1', '20200101', 'FAM_Q')
 
-        # --- 1. 적재 인코더 == 검색 인코더면 통과, 다르면 검색 전에 중단 ---
+        # --- 1. Matching indexing/search encoders pass; mismatches stop before search ---
         for field in TEXT_FIELDS:
             chk = qs.verify_encoder_signature(client, settings, field, HashingDenseEncoder(dim=64))
             assert chk['match'] and chk['indexed'] == chk['search'], chk
         try:
             qs.verify_encoder_signature(client, settings, 'title_claims',
                                         HashingDenseEncoder(dim=128))
-            raise AssertionError('인코더 불일치가 차단되지 않음')
+            raise AssertionError('Encoder mismatch was not blocked')
         except qs.SearchSetupError as exc:
-            assert '인코더 불일치' in str(exc), exc
+            assert 'Encoder mismatch' in str(exc), exc
 
-        # --- 2. --field 가 실제로 다른 벡터를 쓰는지 (BM25) ---
-        # 'relevant' 는 OLD_HIT 의 title 에만, 'film' 은 OLD_HIT 의 claims 에만 있다.
+        # --- 2. --field actually selects different BM25 vectors ---
+        # OLD_HIT has 'relevant' only in its title and 'film' only in its claims.
         tc_hits, _ = retriever.search('bm25', 'relevant', pf, limit=10, field='title_claims')
         assert [h['patent_id'] for h in tc_hits] == ['OLD_HIT'], tc_hits
         cl_hits, _ = retriever.search('bm25', 'relevant', pf, limit=10, field='claims')
-        assert cl_hits == [], cl_hits          # claims 벡터에는 title 토큰이 없어야 한다
+        assert cl_hits == [], cl_hits          # Claims vectors must not contain title tokens.
         film_hits, _ = retriever.search('bm25', 'film', pf, limit=10, field='claims')
         assert [h['patent_id'] for h in film_hits] == ['OLD_HIT'], film_hits
 
-        # --- 3. bm25 / dense / hybrid 가 필드별로 동작하며 기존 필터를 유지 ---
+        # --- 3. Field-specific BM25/dense/hybrid retain existing filters ---
         for mode in ('bm25', 'dense', 'hybrid'):
             for field in TEXT_FIELDS:
                 hits, _ = retriever.search(mode, 'ethylene polymer catalyst composition', pf,
                                            limit=10, field=field)
                 ids = [h['patent_id'] for h in hits]
-                assert 'Q1' not in ids, f'{mode}/{field} 자기제외 위반: {ids}'
-                assert 'SAME_FAMILY' not in ids, f'{mode}/{field} 패밀리 제외 위반: {ids}'
-                assert 'FUTURE' not in ids, f'{mode}/{field} 시간 필터 위반: {ids}'
+                assert 'Q1' not in ids, f'{mode}/{field} self-exclusion violation: {ids}'
+                assert 'SAME_FAMILY' not in ids, f'{mode}/{field} family-exclusion violation: {ids}'
+                assert 'FUTURE' not in ids, f'{mode}/{field} time-filter violation: {ids}'
                 assert 'EQUAL_DATE' in ids and 'NO_DATE' in ids, f'{mode}/{field}: {ids}'
 
-        # --- 4. 구조 rerank 가 선택한 필드의 결과 위에서 동작 ---
+        # --- 4. Structure reranking applies to selected-field results ---
         _add_structures(client, settings, [('Q1', 'M1', 'CCO'), ('OLD_HIT', 'M2', 'CCO'),
                                            ('UNRELATED', 'M3', 'c1ccccc1')])
         for field in TEXT_FIELDS:
@@ -610,7 +592,7 @@ def test_integration_search_cli_field_routing_signature_and_rerank():
             ids = [h['patent_id'] for h in reranked]
             scored = {h['patent_id']: h.get('tanimoto_score') for h in reranked}
             assert stats['reranked'] == len(hits) and stats['with_structure'] >= 1, stats
-            assert scored.get('OLD_HIT') == 1.0, scored     # 같은 SMILES -> Tanimoto 1.0
+            assert scored.get('OLD_HIT') == 1.0, scored     # Identical SMILES -> Tanimoto 1.0.
             assert 'Q1' not in ids and 'SAME_FAMILY' not in ids and 'FUTURE' not in ids, ids
         client.close()
     finally:
@@ -618,30 +600,25 @@ def test_integration_search_cli_field_routing_signature_and_rerank():
 
 
 def test_integration_snapshot_restore_server_mode_full_verification():
-    """서버 모드 전용 v2 스냅샷 복원 검증 - 이 항목만 실행 중인 Qdrant 서버가 있을 때
-    동작한다. 이 세션/환경에는 서버 바이너리가 없고 지시에 따라 새로 받지 않았으므로
-    SKIP 되며, run_tests.py 러너가 SKIP 사유를 그대로 출력한다(실패로 위장하지 않음).
-
-    CHEMRAG_TEST_QDRANT_SERVER_URL 환경변수로 실행 중인 서버를 가리키면(예:
-    http://localhost:6333) 실제로 검증한다: payload 인덱스가 서버에 실제로 걸리는지
-    (verify_live_payload_schema로 재조회), alias가 실제로 존재하고 대상이 맞는지,
-    restore_snapshot()의 all_ok가 서버 모드 엄격 기준으로 참인지."""
+    """Server-only v2 snapshot restore verification requires a running Qdrant server. This environment lacked a server binary and did not download one, so the runner reports SKIP with its reason.
+    Set CHEMRAG_TEST_QDRANT_SERVER_URL, e.g. http://localhost:6333, to verify actual payload indexes through verify_live_payload_schema, alias existence/targets, and strict server-mode restore_snapshot all_ok.
+    """
     import uuid as _uuid
     server_url = os.environ.get('CHEMRAG_TEST_QDRANT_SERVER_URL')
     if not server_url:
         raise FileNotFoundError(
-            'CHEMRAG_TEST_QDRANT_SERVER_URL 환경변수가 설정되지 않음 - 이 세션/환경에는 '
-            'Qdrant 서버 바이너리가 없고, 지시에 따라 새로 다운로드하지 않았습니다. '
-            '실행 중인 Qdrant 서버가 있으면 예: '
-            'CHEMRAG_TEST_QDRANT_SERVER_URL=http://localhost:6333 로 설정하고 다시 실행하세요.')
+            'CHEMRAG_TEST_QDRANT_SERVER_URL is not set; this environment has '
+            'no Qdrant server binary and none was downloaded under the instructions. '
+            'With a running Qdrant server, set e.g. '
+            'CHEMRAG_TEST_QDRANT_SERVER_URL=http://localhost:6333 and rerun.')
     from qdrant_client import QdrantClient
     try:
         probe = QdrantClient(url=server_url, timeout=5)
         probe.get_collections()
         probe.close()
     except Exception as exc:
-        raise FileNotFoundError(f'{server_url} 에 연결할 수 없음 - 서버가 떠있지 않은 것으로 '
-                                f'보입니다: {type(exc).__name__}: {exc}')
+        raise FileNotFoundError(f'{server_url} is unreachable; the server appears '
+                                f'not to be running: {type(exc).__name__}: {exc}')
 
     from qdrant_engine.snapshot import export_collection, write_manifest, restore_snapshot
 
@@ -660,8 +637,8 @@ def test_integration_snapshot_restore_server_mode_full_verification():
         meta_p = export_collection(client1, settings1.patents_collection, out, role='patents',
                                    alias=patents_alias)
         meta_s = export_collection(client1, settings1.structures_collection, out, role='structures')
-        # 복원 대상 컬렉션 이름으로 manifest를 바꿔친다(원본 임시 컬렉션 이름이 아니라
-        # 서버에 새로 만들 이름으로 복원해야 하므로).
+        # Rewrite the manifest with restore-target collection names, not the original
+        # temporary names, since new collections must be created on the server.
         meta_p['collection'] = settings2.patents_collection
         meta_s['collection'] = settings2.structures_collection
         mpath, manifest = write_manifest(out, [meta_p, meta_s], settings1, 'test-server')
@@ -673,7 +650,7 @@ def test_integration_snapshot_restore_server_mode_full_verification():
             assert c['points_match'] and c['point_id_set_match'] and c['vector_schema_match'], c
             assert not c['payload_indexes']['failed'], c['payload_indexes']
             assert 'live_schema_check' in c['payload_indexes'], \
-                '서버 모드인데 실측 payload schema 대조가 기록되지 않음'
+                'Server mode did not record live payload-schema verification'
             assert all(v['match'] for v in c['payload_indexes']['live_schema_check'].values()), \
                 c['payload_indexes']['live_schema_check']
             assert c['payload_indexes_ok'], c['payload_indexes']

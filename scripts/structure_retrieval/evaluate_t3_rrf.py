@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""T1 텍스트 순위와 T2 구조 순위를 Equal RRF로 결합해 평가한다.
-
-이 스크립트는 동일한 query와 후보 집합에서 생성한 전체 순위만
-입력으로 받는다. 두 순위의 후보 집합이 다르거나 상위 일부만
-저장된 경우에는 결합하지 않고 실행을 중단한다.
-"""
+"""Fuse T1 text and T2 structure rankings using equal RRF. Require complete rankings with identical queries/candidates; stop instead of fusing mismatched candidate sets or truncated inputs."""
 
 from __future__ import annotations
 
@@ -110,32 +105,32 @@ def load_ground_truth(
             row = json.loads(line)
             query_id = normalize_exact_ep(row.get("query_patent_id"))
             if query_id is None or query_id in output:
-                raise SystemExit(f"ground truth query가 잘못됐습니다: {path}:{row_number}")
+                raise SystemExit(f"Invalid ground-truth query: {path}:{row_number}")
             if conflict_field not in row:
                 raise SystemExit(
-                    f"지정한 X-category 필드가 없습니다: "
+                    f"Requested X-category field missing: "
                     f"{path}:{row_number}:{conflict_field}"
                 )
 
             def normalized(values: Any, label: str) -> set[str]:
                 if not isinstance(values, list):
-                    raise SystemExit(f"{label} 형식이 잘못됐습니다: {path}:{row_number}")
+                    raise SystemExit(f"{label} has invalid format: {path}:{row_number}")
                 patents = {normalize_exact_ep(value) for value in values}
                 if None in patents:
-                    raise SystemExit(f"{label} 특허번호가 잘못됐습니다: {path}:{row_number}")
+                    raise SystemExit(f"{label} has invalid patent identifier: {path}:{row_number}")
                 return {value for value in patents if value is not None}
 
             citation = normalized(row.get("all_cited_patents") or [], "Citation gold")
             conflict = normalized(row.get(conflict_field) or [], "Conflict-X gold")
             if alternate_field in row:
-                alternate = normalized(row.get(alternate_field) or [], "호환 X gold")
+                alternate = normalized(row.get(alternate_field) or [], "compatibility X gold")
                 if conflict != alternate:
                     raise SystemExit(
-                        "X-category 호환 필드가 서로 다릅니다: "
+                        "X-category compatibility fields disagree: "
                         f"{path}:{row_number}"
                     )
             if not conflict.issubset(citation):
-                raise SystemExit(f"Conflict-X gold가 Citation gold의 부분집합이 아닙니다: {query_id}")
+                raise SystemExit(f"Conflict-X gold is not a subset of Citation gold: {query_id}")
             output[query_id] = {"Citation": citation, "Conflict-X": conflict}
     return output
 
@@ -160,16 +155,16 @@ def load_per_query_index(
         }
         missing = required - set(reader.fieldnames or [])
         if missing:
-            raise SystemExit(f"query 결과 필수 열이 없습니다: {path}:{sorted(missing)}")
+            raise SystemExit(f"Missing required query-result columns: {path}:{sorted(missing)}")
         for row_number, row in enumerate(reader, start=2):
             model = str(row.get(model_column) or "").strip()
             query_id = normalize_exact_ep(row.get("query_patent_id"))
             task = str(row.get("task") or "").strip()
             if not model or query_id is None or task not in TASKS:
-                raise SystemExit(f"query 결과 행이 잘못됐습니다: {path}:{row_number}")
+                raise SystemExit(f"Invalid query-result row: {path}:{row_number}")
             if query_id in output[model][task]:
                 raise SystemExit(
-                    f"모델·task·query가 중복됩니다: "
+                    f"Duplicate model/task/query: "
                     f"{path}:{row_number}:{model}:{task}:{query_id}"
                 )
             output[model][task][query_id] = {
@@ -179,7 +174,7 @@ def load_per_query_index(
             }
             models.add(model)
     if not models:
-        raise SystemExit(f"query 결과가 없습니다: {path}")
+        raise SystemExit(f"Query results missing: {path}")
     return output, models
 
 
@@ -198,26 +193,26 @@ def load_rankings(
             query_id = normalize_exact_ep(row.get("query_patent_id"))
             ranking = row.get("ranking")
             if not model or query_id is None or not isinstance(ranking, list):
-                raise SystemExit(f"ranking 행이 잘못됐습니다: {path}:{row_number}")
+                raise SystemExit(f"Invalid ranking row: {path}:{row_number}")
             if query_id in output[model]:
-                raise SystemExit(f"모델·query ranking이 중복됩니다: {path}:{row_number}")
+                raise SystemExit(f"Duplicate model/query ranking: {path}:{row_number}")
             patent_ids: list[str] = []
             for expected_rank, item in enumerate(ranking, start=1):
                 if not isinstance(item, dict) or item.get("rank") != expected_rank:
                     raise SystemExit(
-                        f"ranking 순위가 연속적이지 않습니다: "
+                        f"Ranking ranks are not contiguous: "
                         f"{path}:{row_number}:{expected_rank}"
                     )
                 patent_id = normalize_exact_ep(item.get("patent_id"))
                 if patent_id is None or patent_id == query_id:
-                    raise SystemExit(f"ranking 특허번호가 잘못됐습니다: {path}:{row_number}")
+                    raise SystemExit(f"Invalid ranking patent identifier: {path}:{row_number}")
                 patent_ids.append(patent_id)
             if len(patent_ids) != len(set(patent_ids)):
-                raise SystemExit(f"ranking에 중복 후보가 있습니다: {path}:{row_number}")
+                raise SystemExit(f"Ranking contains duplicate candidates: {path}:{row_number}")
             output[model][query_id] = patent_ids
             models.add(model)
     if not models:
-        raise SystemExit(f"ranking이 없습니다: {path}")
+        raise SystemExit(f"Ranking missing: {path}")
     return output, models
 
 
@@ -235,7 +230,7 @@ def require_full_rankings(
         missing_queries = expected_queries - available_queries
         if missing_queries:
             raise SystemExit(
-                f"{label} 평가 query의 ranking이 누락됐습니다: "
+                f"{label} evaluation queries lack rankings: "
                 f"{model}:count={len(missing_queries)}, "
                 f"examples={sorted(missing_queries)[:5]}"
             )
@@ -248,13 +243,13 @@ def require_full_rankings(
             expected_counts = {row["candidate_count_ranked"] for row in task_rows}
             written_counts = {row["ranking_rows_written"] for row in task_rows}
             if len(expected_counts) != 1 or len(written_counts) != 1:
-                raise SystemExit(f"{label} 후보 수가 task별로 다릅니다: {model}:{query_id}")
+                raise SystemExit(f"{label} candidate counts differ across tasks: {model}:{query_id}")
             expected_count = next(iter(expected_counts))
             written_count = next(iter(written_counts))
             actual_count = len(rankings[model][query_id])
             if written_count != expected_count or actual_count != expected_count:
                 raise SystemExit(
-                    f"{label} ranking이 전체 후보를 포함하지 않습니다: "
+                    f"{label} ranking does not contain all candidates: "
                     f"{model}:{query_id}:expected={expected_count}, "
                     f"declared={written_count}, actual={actual_count}"
                 )
@@ -266,7 +261,7 @@ def fuse_rrf(
     rrf_k: float,
 ) -> list[tuple[str, float]]:
     if set(text_ranking) != set(structure_ranking):
-        raise ValueError("T1과 T2 ranking의 후보 집합이 다릅니다")
+        raise ValueError("T1/T2 ranking candidate sets differ")
     text_rank = {patent_id: rank for rank, patent_id in enumerate(text_ranking, start=1)}
     structure_rank = {
         patent_id: rank for rank, patent_id in enumerate(structure_ranking, start=1)
@@ -350,11 +345,11 @@ def run_self_test() -> None:
     except ValueError:
         pass
     else:
-        raise AssertionError("다른 후보 집합을 허용했습니다")
+        raise AssertionError("Different candidate sets were incorrectly accepted")
     metrics = evaluate_ranking(fused, {"EP3A1"})
     assert metrics["R@1"] == 0.0
     assert metrics["R@5"] == 1.0
-    print("자체 검증을 통과했습니다.")
+    print("Self-check passed.")
 
 
 def main() -> int:
@@ -390,20 +385,20 @@ def main() -> int:
     }
     missing_arguments = [name for name, value in required.items() if value is None]
     if missing_arguments:
-        parser.error(f"필수 인자가 없습니다: {', '.join(missing_arguments)}")
+        parser.error(f"Missing required arguments: {', '.join(missing_arguments)}")
     missing_files = [
         str(path)
         for name, path in required.items()
         if name != "--output-dir" and not path.is_file()
     ]
     if missing_files:
-        raise SystemExit(f"입력 파일이 없습니다: {missing_files}")
+        raise SystemExit(f"Input file missing: {missing_files}")
     if args.rrf_k <= 0:
-        parser.error("--rrf-k는 0보다 커야 합니다")
+        parser.error("--rrf-k must be greater than 0")
     if args.ranking_output_limit < 100:
-        parser.error("--ranking-output-limit은 100 이상이어야 합니다")
+        parser.error("--ranking-output-limit must be at least 100")
     if args.iterations < 1000:
-        parser.error("--iterations는 1000 이상이어야 합니다")
+        parser.error("--iterations must be at least 1000")
 
     started_at = time.perf_counter()
     ground_truth = load_ground_truth(args.ground_truth, args.conflict_field)
@@ -414,7 +409,7 @@ def main() -> int:
     )
     if len(structure_models) != 1:
         raise SystemExit(
-            f"Equal RRF 1차 실험은 T2 모델 하나만 허용합니다: {sorted(structure_models)}"
+            f"Initial equal-RRF experiment allows only one T2 model: {sorted(structure_models)}"
         )
     structure_model = next(iter(structure_models))
     text_rankings, text_ranking_models = load_rankings(args.text_rankings, "source")
@@ -423,9 +418,9 @@ def main() -> int:
         "method",
     )
     if text_models != text_ranking_models:
-        raise SystemExit("T1 query 결과와 ranking의 source 집합이 다릅니다")
+        raise SystemExit("T1 query-result and ranking source sets differ")
     if structure_models != structure_ranking_models:
-        raise SystemExit("T2 query 결과와 ranking의 method 집합이 다릅니다")
+        raise SystemExit("T2 query-result and ranking method sets differ")
     require_full_rankings(
         text_per_query,
         text_rankings,
@@ -456,7 +451,7 @@ def main() -> int:
             structure_queries = set(structure_per_query[structure_model].get(task, {}))
             if text_queries != structure_queries:
                 raise SystemExit(
-                    f"T1과 T2의 평가 query 집합이 다릅니다: "
+                    f"T1/T2 evaluation query sets differ: "
                     f"source={text_model}, task={task}"
                 )
             query_counts[fusion_name][task] = len(text_queries)
@@ -465,16 +460,16 @@ def main() -> int:
             fusion_metric_values = {metric: [] for metric in METRICS}
             for query_id in sorted(text_queries):
                 if query_id not in ground_truth:
-                    raise SystemExit(f"ground truth에 query가 없습니다: {query_id}")
+                    raise SystemExit(f"Query missing from ground truth: {query_id}")
                 gold = ground_truth[query_id][task]
                 if not gold:
-                    raise SystemExit(f"평가 query의 gold가 비어 있습니다: {task}:{query_id}")
+                    raise SystemExit(f"Evaluation query has empty gold: {task}:{query_id}")
                 text_meta = text_per_query[text_model][task][query_id]
                 structure_meta = structure_per_query[structure_model][task][query_id]
                 if text_meta["gold_count"] != len(gold) or structure_meta["gold_count"] != len(gold):
-                    raise SystemExit(f"gold 수가 입력과 다릅니다: {task}:{query_id}")
+                    raise SystemExit(f"Gold count differs from input: {task}:{query_id}")
                 if text_meta["candidate_count_ranked"] != structure_meta["candidate_count_ranked"]:
-                    raise SystemExit(f"T1과 T2의 후보 수가 다릅니다: {task}:{query_id}")
+                    raise SystemExit(f"T1/T2 candidate counts differ: {task}:{query_id}")
 
                 text_ids = text_rankings[text_model][query_id]
                 structure_ids = structure_rankings[structure_model][query_id]
@@ -641,13 +636,13 @@ def main() -> int:
         "status": "completed",
         "method": "equal_reciprocal_rank_fusion",
         "rrf_k": args.rrf_k,
-        "rrf_k_policy": "원 논문의 k=60을 사전 고정하며 테스트 결과로 조정하지 않음",
+        "rrf_k_policy": "Fix the original paper's k=60 in advance; do not tune on test results",
         "score_definition": "1/(k + text rank) + 1/(k + structure rank)",
         "candidate_policy": (
-            "T1과 T2에서 query 자신을 제외한 동일 전체 후보 순위만 결합; "
-            "후보 집합이 다르거나 상위 일부만 있으면 중단"
+            "Fuse identical complete T1/T2 candidate rankings after self-exclusion; "
+            "stop on mismatched or truncated candidate sets"
         ),
-        "tie_break_policy": "RRF 점수가 같으면 EP 특허번호 오름차순",
+        "tie_break_policy": "Break equal RRF scores by ascending EP patent identifier",
         "metric_definitions": METRIC_DEFINITIONS,
         "text_sources": sorted(text_models),
         "structure_method": structure_model,
@@ -655,12 +650,12 @@ def main() -> int:
         "ranking_output_limit": args.ranking_output_limit,
         "paired_inference": {
             "unit": "query",
-            "comparison": "각 RRF 결합과 해당 결합에 사용한 T1 원본",
+            "comparison": "Each RRF fusion versus its corresponding original T1",
             "bootstrap_iterations": args.iterations,
             "sign_flip_iterations": args.iterations,
             "seed": args.seed,
             "confidence_interval": "percentile paired bootstrap 95% CI",
-            "multiple_comparison_policy": "task·metric별 T1 source 두 개 비교에 Holm 보정",
+            "multiple_comparison_policy": "Holm correction over two T1-source comparisons per task/metric",
         },
         "ground_truth_field_mapping": {
             "Citation": "all_cited_patents",

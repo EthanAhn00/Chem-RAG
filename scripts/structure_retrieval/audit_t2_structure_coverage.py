@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
-"""T2 구조 검색 실험 전에 특허별 SMILES 커버리지와 입력 품질을 감사한다.
-
-이 스크립트는 검색 점수를 계산하거나 Qdrant를 수정하지 않는다. 평가 ground truth,
-후보 특허 목록, 하나 이상의 구조원을 특허번호 단위로 결합해 다음을 확인한다.
-
-- query, 전체 인용 gold, X 인용 gold, 후보 코퍼스의 구조 보유율
-- RDKit 파싱 실패, 빈 SMILES, 잘못된 특허번호, 중복 구조 연결
-- query별 전체 gold/X gold 구조 가용성과 부분집합 평가 가능 여부
-- 국가·공개번호·kind code 정규화 충돌과 kind code 미상 입력
-
-직접 특허번호와 SMILES가 함께 있는 CSV/JSONL은 ``--structure-file``로 받는다.
-``structure_id``와 특허 출현 정보가 분리된 PatCID 산출물은 ``--occurrences``를 함께
-지정한다. 기존 ``molecule.csv``/``patent_molecule.csv`` 쌍도 별도 옵션으로 받을 수 있다.
+"""Audit patent SMILES coverage and input quality before T2 retrieval. No retrieval scores are computed and Qdrant is unchanged. Join ground truth, candidate patents, and structure sources by patent identifier. Inspect query/all-citation gold/X gold/corpus coverage, RDKit failures/empty SMILES/invalid IDs/duplicate links, complete-gold availability per query, normalization conflicts, and unknown kind codes.
+Use --structure-file for direct patent/SMILES CSV or JSONL, --occurrences for separate PatCID structure_id/patent mappings, or the legacy molecule.csv/patent_molecule.csv options.
 """
 
 from __future__ import annotations
@@ -54,7 +43,7 @@ def write_csv(path: Path, fieldnames: list[str], rows: Iterable[dict[str, Any]])
 
 
 def read_records(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
-    """CSV 또는 JSONL을 읽고 1부터 시작하는 데이터 행 번호와 레코드를 반환한다."""
+    """Read CSV or JSONL and yield records with one-based data-row numbers."""
     suffix = path.suffix.lower()
     if suffix == ".csv":
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -68,14 +57,14 @@ def read_records(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
                     continue
                 value = json.loads(line)
                 if not isinstance(value, dict):
-                    raise ValueError(f"{path}:{row_number} JSON 객체가 아닙니다")
+                    raise ValueError(f"{path}:{row_number} is not a JSON object")
                 yield row_number, value
         return
-    raise ValueError(f"지원하지 않는 파일 형식입니다: {path} (CSV 또는 JSONL 필요)")
+    raise ValueError(f"Unsupported file format: {path} (CSV or JSONL required)")
 
 
 def normalize_patent_id(value: Any) -> str | None:
-    """EP 공개번호를 정규화하되 kind code는 보존한다."""
+    """Normalize EP publication identifiers while retaining kind codes."""
     compact = re.sub(r"[^A-Z0-9]", "", str(value or "").strip().upper())
     match = EP_NUMBER_RE.fullmatch(compact)
     if not match:
@@ -110,13 +99,13 @@ class StructureRecord:
 
 
 class Canonicalizer:
-    """SMILES 표준화 결과를 캐시하고 RDKit 오류를 외부로 전파하지 않는다."""
+    """Cache standardized SMILES and contain RDKit errors."""
 
     def __init__(self) -> None:
         try:
             from rdkit import Chem, RDLogger
         except ImportError as exc:
-            raise SystemExit("RDKit이 필요합니다. chemrag_property 환경에서 실행하세요.") from exc
+            raise SystemExit("RDKit is required. Run in the chemrag_property environment.") from exc
         RDLogger.DisableLog("rdApp.*")
         self._chem = Chem
         self._cache: dict[str, str | None] = {}
@@ -170,7 +159,7 @@ def load_ground_truth(
     dict[str, str],
 ]:
     if conflict_field not in {"conflict_patents", "x_category_patents"}:
-        raise ValueError(f"지원하지 않는 X-category 필드입니다: {conflict_field}")
+        raise ValueError(f"Unsupported X-category field: {conflict_field}")
     alternate_field = (
         "x_category_patents"
         if conflict_field == "conflict_patents"
@@ -350,7 +339,7 @@ def load_occurrences(
     paths: list[Path],
     issues: list[dict[str, Any]],
 ) -> dict[str, set[tuple[str, str]]]:
-    """structure_id -> {(정규화 특허번호, 원본 특허번호)} 매핑을 만든다."""
+    """Build structure_id -> {(normalized patent ID, original patent ID)} mappings."""
     mapping: dict[str, set[tuple[str, str]]] = defaultdict(set)
     for path in paths:
         for row_number, row in read_records(path):
@@ -674,14 +663,14 @@ def main() -> int:
         type=Path,
         action="append",
         default=[],
-        help="patent_id/patent_ids와 SMILES가 있는 CSV 또는 JSONL, 반복 지정 가능",
+        help="CSV/JSONL containing patent_id/patent_ids and SMILES; repeatable",
     )
     parser.add_argument(
         "--occurrences",
         type=Path,
         action="append",
         default=[],
-        help="structure_id와 patent_id 연결 CSV/JSONL, 반복 지정 가능",
+        help="CSV/JSONL linking structure_id and patent_id; repeatable",
     )
     parser.add_argument("--legacy-molecules", type=Path)
     parser.add_argument("--legacy-patent-molecules", type=Path)
@@ -689,7 +678,7 @@ def main() -> int:
         "--minimum-evaluable-queries",
         type=int,
         default=30,
-        help="부분집합 성능지표 산출을 허용할 최소 query 수",
+        help="Minimum queries required to report subset performance metrics",
     )
     parser.add_argument(
         "--conflict-field",
@@ -700,11 +689,11 @@ def main() -> int:
     args = parser.parse_args()
 
     if not args.structure_file and not args.legacy_molecules:
-        parser.error("--structure-file 또는 legacy 구조 파일 쌍이 필요합니다")
+        parser.error("Require --structure-file or the legacy structure-file pair")
     if bool(args.legacy_molecules) != bool(args.legacy_patent_molecules):
-        parser.error("--legacy-molecules와 --legacy-patent-molecules는 함께 지정해야 합니다")
+        parser.error("Specify --legacy-molecules and --legacy-patent-molecules together")
     if args.minimum_evaluable_queries < 1:
-        parser.error("--minimum-evaluable-queries는 1 이상이어야 합니다")
+        parser.error("--minimum-evaluable-queries must be at least 1")
 
     input_paths = [args.ground_truth, args.candidate_patents]
     input_paths.extend(args.structure_file)
@@ -713,7 +702,7 @@ def main() -> int:
         input_paths.extend([args.legacy_molecules, args.legacy_patent_molecules])
     missing = [str(path) for path in input_paths if not path.is_file()]
     if missing:
-        raise SystemExit(f"입력 파일이 없습니다: {missing}")
+        raise SystemExit(f"Input file missing: {missing}")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     issues: list[dict[str, Any]] = []
@@ -855,11 +844,11 @@ def main() -> int:
         "t2_feasibility": feasibility,
         "normalization": {
             "patent_id": (
-                "EP 국가·공개번호·kind code를 보존하고 구분자만 제거한 키; "
-                "kind code 미상 키는 exact 문서 키와 결합하지 않음"
+                "Keys preserve EP country/publication number/kind code, removing only separators; "
+                "unknown-kind keys are not merged with exact document keys"
             ),
             "smiles": "RDKit canonical SMILES",
-            "missing_structure_policy": "유사도 0으로 대체하지 않고 결측 유지",
+            "missing_structure_policy": "Retain missingness rather than replacing it with zero similarity",
         },
         "ground_truth": {
             "query_count": len(queries),
@@ -889,16 +878,16 @@ def main() -> int:
         },
         "decision_rules": {
             "full_corpus_structure_only_ready": (
-                "critical issue가 없고 query, 전체 gold, 명시적 후보 코퍼스의 모든 특허가 "
-                "최소 하나의 유효 구조를 보유"
+                "No critical issues and every query, all-gold patent, and explicit corpus patent "
+                "has at least one valid structure"
             ),
             "subset_only_structure_evaluation_possible": (
-                "구조가 있는 query와 전체 인용 gold가 최소 설정 query 수 이상 겹치지만 "
-                "전체 코퍼스 조건은 충족하지 않음"
+                "Structure-bearing queries with complete citation gold meet the minimum query gate, "
+                "but full-corpus conditions are not satisfied"
             ),
             "not_benchmark_evaluable_insufficient_query_gold_structure_overlap": (
-                "구조가 있는 query와 전체 인용 gold의 겹침이 최소 설정 query 수보다 적어 "
-                "검색 성능지표를 벤치마크 결과로 산출하지 않음"
+                "Structure-bearing queries with complete citation gold fall below the query gate; "
+                "do not report retrieval metrics as benchmark results"
             ),
         },
     }
@@ -956,35 +945,35 @@ def main() -> int:
     write_json(args.output_dir / "t2_structure_coverage_manifest.json", manifest)
 
     report_lines = [
-        "# T2 구조 검색 입력 커버리지 감사",
+        "# T2 structure-input coverage audit",
         "",
-        f"- 판정: `{feasibility}`",
-        f"- query: {coverage['query']['patents_with_structure']}/{coverage['query']['patent_count']} 구조 보유",
+        f"- Verdict: `{feasibility}`",
+        f"- query: {coverage['query']['patents_with_structure']}/{coverage['query']['patent_count']} have structures",
         (
-            f"- 전체 인용 gold 고유 특허: {coverage['all_gold_unique']['patents_with_structure']}"
-            f"/{coverage['all_gold_unique']['patent_count']} 구조 보유"
+            f"- Unique all-citation gold patents: {coverage['all_gold_unique']['patents_with_structure']}"
+            f"/{coverage['all_gold_unique']['patent_count']} have structures"
         ),
         (
-            f"- X 인용 gold 고유 특허: {coverage['x_gold_unique']['patents_with_structure']}"
-            f"/{coverage['x_gold_unique']['patent_count']} 구조 보유"
+            f"- Unique X-citation gold patents: {coverage['x_gold_unique']['patents_with_structure']}"
+            f"/{coverage['x_gold_unique']['patent_count']} have structures"
         ),
         (
-            f"- 후보 코퍼스: {coverage['candidate_corpus']['patents_with_structure']}"
-            f"/{coverage['candidate_corpus']['patent_count']} 구조 보유"
+            f"- Candidate corpus: {coverage['candidate_corpus']['patents_with_structure']}"
+            f"/{coverage['candidate_corpus']['patent_count']} have structures"
         ),
         (
-            f"- 전체 인용 태스크 부분 평가 가능 query: "
+            f"- Evaluable subset queries for all-citation task: "
             f"{query_eligibility['all_task_any_gold_evaluable_queries']}/{len(query_rows)}"
         ),
-        f"- 부분집합 성능지표 최소 query gate: {args.minimum_evaluable_queries}",
-        f"- critical 품질 문제: {critical_issues}건",
+        f"- Minimum query gate for subset metrics: {args.minimum_evaluable_queries}",
+        f"- Critical quality issues: {critical_issues} records",
         "",
-        "## 해석 원칙",
+        "## Interpretation rules",
         "",
-        "- 구조가 없는 특허를 유사도 0으로 대체하지 않는다.",
-        "- 부분집합 성능은 전체 benchmark 성능과 별도로 보고한다.",
-        "- 후보 코퍼스 구조가 불완전하면 full-corpus structure-only 결과로 표현하지 않는다.",
-        "- 평가 가능 query가 최소 gate 미만이면 검색 성능지표를 산출하지 않는다.",
+        "- Do not replace missing structures with zero similarity.",
+        "- Report subset performance separately from full-benchmark performance.",
+        "- Incomplete corpus structures do not support a full-corpus structure-only claim.",
+        "- Do not compute retrieval metrics below the minimum evaluable-query gate.",
     ]
     (args.output_dir / "t2_structure_coverage_report.md").write_text(
         "\n".join(report_lines) + "\n", encoding="utf-8"

@@ -1,25 +1,9 @@
-"""특허-화학구조 위치 메타데이터(in_claim / in_figure / 등장 횟수) 생성 스크립트.
-
-원본 CSV는 절대 수정하지 않고, data/db_export/derived/ 아래에 재사용 가능한
-산출물을 새로 만든다.
-
-핵심 원칙 - 데이터에 근거하지 않은 값을 만들지 않는다
-  * in_claim / in_figure는 true / false / unknown 3-값. '확인 못 함'은 false가 아니라 unknown.
-  * in_claim=true는 아래 중 하나의 추적 가능한 근거가 있을 때만 부여한다.
-      1) patent_molecule의 명시적 claim 위치 연결(location/unit_ref)
-      2) claim_element.element_smiles의 RDKit 검증된 구조 일치
-      3) 청구항 텍스트에서 추출한 InChIKey / SMILES의 검증된 일치
-    단순 문자열 부분일치는 쓰지 않는다 - 반드시 RDKit으로 파싱해 canonical SMILES
-    또는 InChIKey 수준에서 비교한다.
-  * in_figure=true는 figure.ocsr_smiles 등 검증된 figure-molecule 연결이 있을 때만.
-    '도면 행이 존재한다'는 사실만으로는 절대 true로 만들지 않는다.
-  * false는 해당 특허에 구조 주석이 실제로 존재하는데(=닫힌 세계 가정이 가능한데)
-    이 분자가 거기 없을 때만 부여한다.
-  * claim_occurrence_count는 검증 가능한 범위에서만 정수, 아니면 null + 상태 필드.
-
-사용법:
-    python3 scripts/qdrant/qdrant_build_structure_metadata.py
-    python3 scripts/qdrant/qdrant_build_structure_metadata.py --out-dir data/db_export/derived
+"""Generate patent-structure location metadata (in_claim / in_figure / occurrences) under data/db_export/derived/ without changing source CSVs.
+Never fabricate unsupported values. in_claim/in_figure use true/false/unknown; unverified is unknown, not false.
+Set in_claim=true only with traceable claim location/unit_ref, RDKit-validated claim_element.element_smiles, or validated InChIKey/SMILES extracted from claims. Compare canonical SMILES or InChIKey after RDKit parsing, never mere substrings.
+Set in_figure=true only with verified figure-molecule links such as figure.ocsr_smiles, not merely a figure row. Assign false only when structure annotations exist for that patent and omit the molecule under a closed-world assumption.
+Use integer claim_occurrence_count only when verifiable, otherwise null plus status.
+Usage: python3 scripts/qdrant/qdrant_build_structure_metadata.py [--out-dir data/db_export/derived].
 """
 import os
 import re
@@ -40,11 +24,11 @@ from qdrant_engine.provenance import source_version
 DB_EXPORT_DIR = os.path.join(DATA_DIR, 'db_export')
 DEFAULT_OUT_DIR = os.path.join(DB_EXPORT_DIR, 'derived')
 
-# 청구항 텍스트에서 InChIKey는 형식이 고정돼 있어 오탐 위험이 매우 낮다
+# InChIKey's fixed format makes accidental claim-text matches unlikely.
 INCHIKEY_RE = re.compile(r'\b([A-Z]{14}-[A-Z]{10}-[A-Z])\b')
-# SMILES 후보 토큰: 화학식에 쓰이는 문자만으로 이루어지고 결합/고리 기호를 포함한 것
+# Candidate SMILES tokens use chemical characters and include bond/ring symbols.
 SMILES_CANDIDATE_RE = re.compile(r'(?<![A-Za-z0-9])([A-Za-z0-9@\+\-\[\]\(\)=#\\/%\.]{6,})(?![A-Za-z0-9])')
-# 최소 중원자 수 - 너무 작은 분자는 우연한 문자열 일치 위험이 커서 텍스트 근거로 인정하지 않음
+# Require minimum heavy atoms; tiny molecules risk accidental text matches.
 MIN_HEAVY_ATOMS_FOR_TEXT_EVIDENCE = 3
 
 
@@ -58,7 +42,7 @@ def nonempty(v):
 
 
 class Canonicalizer:
-    """SMILES -> (canonical SMILES, InChIKey, 중원자 수). 실패는 None."""
+    """SMILES -> (canonical SMILES, InChIKey, heavy-atom count), or None on failure."""
 
     def __init__(self):
         from rdkit import Chem, RDLogger
@@ -87,12 +71,7 @@ class Canonicalizer:
 
 
 def extract_text_structure_evidence(text, canon, target_canonical, target_inchikey):
-    """청구항 텍스트에서 '검증된' 구조 근거만 뽑는다.
-
-    반환: (근거 리스트, 텍스트 스캔 여부)
-    - InChIKey 완전 일치
-    - SMILES 후보 토큰을 RDKit으로 파싱해 canonical SMILES가 대상과 같은 경우
-    """
+    """Extract only validated structure evidence from claims. Return (evidence list, text-scanned flag). Accept exact InChIKey matches or candidate SMILES that RDKit canonicalizes to the target structure."""
     evidence = []
     if not nonempty(text):
         return evidence, False
@@ -105,7 +84,7 @@ def extract_text_structure_evidence(text, canon, target_canonical, target_inchik
 
     for m in SMILES_CANDIDATE_RE.finditer(text):
         token = m.group(1)
-        # 순수 영단어/숫자는 SMILES 후보에서 제외(결합·고리·분기 기호가 하나도 없으면 스킵)
+        # Exclude plain words/numbers without bond/ring/branching symbols from SMILES candidates.
         if not any(ch in token for ch in '()[]=#@+.\\/123456789'):
             continue
         parsed = canon.canon(token)
@@ -120,12 +99,7 @@ def extract_text_structure_evidence(text, canon, target_canonical, target_inchik
 
 
 def load_ocsr_cache(cache_dir, canon):
-    """data/ocsr_cache/*.json 의 OCSR 성공 결과를 특허번호 기준으로 정리한다.
-
-    이 결과는 도면 이미지에서 인식된 구조지만 fig_id가 아니라 문서 페이지 번호만
-    가지고 있다. figure.csv의 fig_no/fig_id와의 대응이 검증되지 않았으므로
-    '검증된 figure 근거'로 승격하지 않고 별도의 미검증 근거로 취급한다.
-    """
+    """Group successful data/ocsr_cache/*.json results by patent number. Results identify pages, not fig_id; correspondence with figure.csv fig_no/fig_id is unverified. Retain as separate unverified evidence, not verified figure evidence."""
     entries = defaultdict(list)
     stats = {'files': 0, 'success': 0, 'not_found': 0, 'unparseable_smiles': 0}
     if not os.path.isdir(cache_dir):
@@ -155,11 +129,7 @@ def load_ocsr_cache(cache_dir, canon):
 
 
 def _patcid_candidate_lines(jsonl_path, prefixes):
-    """4GB급 JSONL에서 관심 특허번호가 포함된 줄만 뽑는다.
-
-    파이썬 루프로 전수 스캔하면 매우 느려서, 가능하면 grep -F로 1차 필터링하고
-    grep이 없으면 컴파일된 정규식 하나로 대체한다(정확도는 동일, 속도만 차이).
-    """
+    """Extract relevant-patent lines from roughly 4GB JSONL. Prefer grep -F for initial filtering over a slow Python full scan; without grep, use one compiled regex with equivalent accuracy but different speed."""
     import shutil
     import tempfile
     import subprocess
@@ -171,7 +141,7 @@ def _patcid_candidate_lines(jsonl_path, prefixes):
         try:
             proc = subprocess.run(['grep', '-F', '-f', pat_file, jsonl_path],
                                   capture_output=True, text=True, timeout=600)
-            # grep 종료코드 1 = 매칭 없음(정상)
+            # grep exit code 1 means no matches, not an error.
             if proc.returncode in (0, 1):
                 return [l for l in proc.stdout.splitlines() if l.strip()], 'grep'
         except Exception:
@@ -192,11 +162,7 @@ def _patcid_candidate_lines(jsonl_path, prefixes):
 
 
 def load_patcid_figures(jsonl_path, wanted_keys, canon, max_lines=None):
-    """PatCID EPO 매핑에서 해당 특허들의 Clean 구조를 읽는다(그대로는 미검증 근거).
-
-    PatCID는 페이지/bbox 단위 인식 결과라 figure.csv의 fig_id와 1:1 대응이
-    검증되지 않았다. 따라서 in_figure=true의 근거로 쓰지 않고 별도 기록만 한다.
-    """
+    """Read Clean structures for requested patents from the PatCID EPO map. Page/bbox recognition is not verified one-to-one with figure.csv fig_id, so record separately, not as in_figure=true evidence."""
     entries = defaultdict(list)
     stats = {'file_present': os.path.exists(jsonl_path), 'prefilter': None,
              'candidate_lines': 0, 'patents_matched': 0,
@@ -217,7 +183,7 @@ def load_patcid_figures(jsonl_path, wanted_keys, canon, max_lines=None):
         ids = obj.get('patent', {}).get('identifiers', []) or []
         keys = {normalize_patent_key(x) for x in ids} & prefixes
         if not keys:
-            stats['false_positive_lines'] += 1   # 부분 문자열 우연 일치
+            stats['false_positive_lines'] += 1   # Accidental substring match.
             continue
         stats['patents_matched'] += 1
         for fig in obj.get('figures', []) or []:
@@ -241,7 +207,7 @@ def load_patcid_figures(jsonl_path, wanted_keys, canon, max_lines=None):
 
 
 def normalize_patent_key(patent_id):
-    """'EP3660125A1', 'EP3660125', 'EP-3660125-B1' -> 'EP3660125' (kind code 무시)."""
+    """'EP3660125A1', 'EP3660125', 'EP-3660125-B1' -> 'EP3660125', ignoring kind code."""
     m = re.match(r'^([A-Za-z]{2})-?(\d+)', str(patent_id or '').strip())
     return f'{m.group(1).upper()}{m.group(2)}' if m else str(patent_id or '')
 
@@ -251,9 +217,9 @@ def main():
     ap.add_argument('--out-dir', default=DEFAULT_OUT_DIR)
     ap.add_argument('--ocsr-cache-dir', default=os.path.join(DATA_DIR, 'ocsr_cache'))
     ap.add_argument('--patcid-epo-jsonl', default=None,
-                    help='PatCID EPO 매핑 jsonl 경로(기본: data/patcid_surechembl_db/patcid/...)')
-    ap.add_argument('--skip-patcid', action='store_true', help='PatCID 스캔 건너뛰기(대용량)')
-    ap.add_argument('--limit-patents', type=int, default=None, help='디버그용 - 처리할 특허 수 상한')
+                    help='PatCID EPO mapping JSONL path (default: data/patcid_surechembl_db/patcid/...)')
+    ap.add_argument('--skip-patcid', action='store_true', help='Skip the large PatCID scan')
+    ap.add_argument('--limit-patents', type=int, default=None, help='Debug limit on patents to process')
     args = ap.parse_args()
 
     paths = {name: os.path.join(DB_EXPORT_DIR, f'{name}.csv') for name in
@@ -261,15 +227,15 @@ def main():
     src_version, src_detail = source_version(list(paths.values()))
     print(f'[source_version] {src_version} {src_detail}')
 
-    print('[1/4] CSV 로딩...')
+    print('[1/4] Loading CSVs...')
     molecules = {r['mol_id']: r for r in load_csv(paths['molecule'])}
     pm_rows = load_csv(paths['patent_molecule'])
     claims_text_of = {}
     for r in load_csv(paths['patent_content']):
         claims_text_of[r['patent_id']] = r.get('claims_text') or ''
 
-    # data/epo_txt의 특허 전문 청구항으로 claims_text를 보강한다.
-    # patent_content.claims_text가 비어 있는 특허만 채우며, 기존 값은 덮어쓰지 않는다.
+    # Supplement empty claims_text using full claims from data/epo_txt.
+    # Never overwrite existing patent_content.claims_text values.
     epo_txt_dir = os.path.join(DATA_DIR, 'epo_txt')
     epo_txt_filled = 0
     if os.path.isdir(epo_txt_dir):
@@ -288,10 +254,10 @@ def main():
             if txt.strip():
                 claims_text_of[pid] = txt
                 epo_txt_filled += 1
-    print(f'  epo_txt로 claims_text 보강: {epo_txt_filled}건')
+    print(f'  claims_text supplemented from epo_txt: {epo_txt_filled} records')
 
-    # 알려진 문제: claim_element.element_id에 중복이 있다. 내부 식별자는 행 번호를 붙여
-    # 충돌 없이 만들고, 원본 element_id는 근거(payload)에 그대로 남긴다.
+    # Known duplicate claim_element.element_id values: append row numbers for
+    # collision-free internal IDs while retaining original IDs in evidence payloads.
     claim_elements_by_patent = defaultdict(list)
     for i, r in enumerate(load_csv(paths['claim_element'])):
         claim_elements_by_patent[r['patent_id']].append({
@@ -311,11 +277,11 @@ def main():
             'image_path': r.get('image_path') or '',
         })
 
-    # (patent_id, mol_id)가 원본에 몇 행으로 기록됐는지(= DB 내 중복 등장 횟수).
-    # 청구항 안에서 몇 번 나오는지(claim_occurrence_count)와는 다른 값이다.
+    # Count source (patent_id, mol_id) rows, i.e. DB duplicates,
+    # not actual occurrences in claims (claim_occurrence_count).
     pair_row_counts = Counter((r['patent_id'], r['mol_id']) for r in pm_rows)
 
-    # (patent_id, mol_id) 중복 제거 - 원본에는 중복 행이 있다
+    # Deduplicate (patent_id, mol_id); source rows can repeat.
     seen_pairs = set()
     pairs = []
     duplicate_rows = 0
@@ -326,12 +292,12 @@ def main():
             continue
         seen_pairs.add(key)
         pairs.append(r)
-    print(f'  patent_molecule 원본 {len(pm_rows)}행 -> 고유 (patent_id, mol_id) {len(pairs)}쌍 '
-          f'(중복 {duplicate_rows}행 제거)')
+    print(f'  Source patent_molecule: {len(pm_rows)} rows -> unique (patent_id, mol_id): {len(pairs)} pairs '
+          f'(duplicates: {duplicate_rows} rows removed)')
 
     canon = Canonicalizer()
 
-    # 특허별로 '구조 주석이 존재하는지'를 먼저 판정한다(닫힌 세계 가정 가능 여부)
+    # First determine annotation availability per patent for the closed-world assumption.
     patent_has_claim_smiles_annotation = {
         pid: any(nonempty(e['element_smiles']) for e in els)
         for pid, els in claim_elements_by_patent.items()}
@@ -339,7 +305,7 @@ def main():
         pid: any(nonempty(f['ocsr_smiles']) for f in figs)
         for pid, figs in figures_by_patent.items()}
 
-    print('[2/4] 청구항 구조 주석 canonical 인덱스 구성...')
+    print('[2/4] Building canonical claim-structure annotation index...')
     claim_struct_index = defaultdict(list)   # patent_id -> [(canonical, inchikey, element_meta)]
     for pid, els in claim_elements_by_patent.items():
         for e in els:
@@ -359,11 +325,11 @@ def main():
                 figure_struct_index[pid].append((parsed['canonical_smiles'], parsed['inchikey'], fmeta))
 
     wanted_keys = {normalize_patent_key(pid) for pid in {r['patent_id'] for r in pairs}}
-    print('[3/5] 추가 근거 소스 조사 (OCSR 캐시 / PatCID)...')
+    print('[3/5] Inspecting additional evidence (OCSR cache / PatCID)...')
     ocsr_entries, ocsr_stats = load_ocsr_cache(args.ocsr_cache_dir, canon)
-    print(f'  OCSR 캐시: {ocsr_stats}')
-    print(f'  OCSR 성공 결과가 있는 특허 중 patent_molecule에 존재: '
-          f'{len(set(ocsr_entries) & wanted_keys)}건')
+    print(f'  OCSR cache: {ocsr_stats}')
+    print(f'  Patents with successful OCSR present in patent_molecule: '
+          f'{len(set(ocsr_entries) & wanted_keys)} records')
     patcid_path = args.patcid_epo_jsonl or os.path.join(
         DATA_DIR, 'patcid_surechembl_db', 'patcid', 'patcid_patent_to_molecules_epo.jsonl')
     if args.skip_patcid:
@@ -372,7 +338,7 @@ def main():
         patcid_entries, patcid_stats = load_patcid_figures(patcid_path, wanted_keys, canon)
     print(f'  PatCID: {patcid_stats}')
 
-    print('[4/5] (patent, molecule)별 위치 판정...')
+    print('[4/5] Determining locations per (patent, molecule)...')
     records = []
     patents_seen = set()
     for r in pairs:
@@ -391,7 +357,7 @@ def main():
                     'methods_attempted': [], 'notes': []}
         pkey = normalize_patent_key(pid)
 
-        # ---------------- 1) patent_molecule의 명시적 위치 연결 ----------------
+        # ---------------- 1) Explicit patent_molecule location links ----------------
         evidence['methods_attempted'].append('patent_molecule_location')
         loc = (r.get('location') or '').strip().lower()
         unit_ref = (r.get('unit_ref') or '').strip()
@@ -400,7 +366,7 @@ def main():
         elif loc in ('figure', 'fig', 'drawing'):
             evidence['figure'].append({'method': 'patent_molecule_location', 'unit_ref': unit_ref or None})
 
-        # ---------------- 2) claim_element.element_smiles 검증 일치 ----------------
+        # ---------------- 2) Validated claim_element.element_smiles matches ----------------
         evidence['methods_attempted'].append('claim_element_smiles')
         matched_claim_nos = []
         if target_canonical:
@@ -417,7 +383,7 @@ def main():
                     if meta['claim_no']:
                         matched_claim_nos.append(meta['claim_no'])
 
-        # ---------------- 3) 청구항 텍스트에서 검증된 구조 추출 ----------------
+        # ---------------- 3) Validated structures extracted from claim text ----------------
         evidence['methods_attempted'].append('claims_text_extraction')
         claims_text = claims_text_of.get(pid, '')
         text_evidence, text_scanned = ([], False)
@@ -426,7 +392,7 @@ def main():
                 claims_text, canon, target_canonical, target_inchikey)
         evidence['claim'].extend(text_evidence)
 
-        # ---------------- 4) figure.ocsr_smiles 검증 일치 ----------------
+        # ---------------- 4) Validated figure.ocsr_smiles matches ----------------
         evidence['methods_attempted'].append('figure_ocsr_smiles')
         matched_fig_ids = []
         if target_canonical:
@@ -438,7 +404,7 @@ def main():
                                                'fig_no': fmeta['fig_no']})
                     matched_fig_ids.append(fmeta['fig_id'])
 
-        # ------- 5) OCSR 캐시(도면 이미지 인식 결과) - 페이지 단위, fig_id 미검증 -------
+        # ------- 5) OCSR image results: page-level, fig_id unverified -------
         evidence['methods_attempted'].append('ocsr_cache')
         if target_canonical:
             for e in ocsr_entries.get(pkey, []):
@@ -448,10 +414,10 @@ def main():
                         'method': 'ocsr_cache', 'source_page': e['source_page'],
                         'confidence': e['confidence'], 'engine': e['engine'],
                         'crop_method': e['crop_method'],
-                        'why_unverified': 'source_page가 figure.csv의 fig_id/fig_no와 대응되는지 검증되지 않음',
+                        'why_unverified': 'source_page correspondence to figure.csv fig_id/fig_no is unverified',
                     })
 
-        # ------- 6) PatCID Clean 구조 - 페이지/bbox 단위, fig_id 미검증 -------
+        # ------- 6) PatCID Clean structures: page/bbox-level, fig_id unverified -------
         evidence['methods_attempted'].append('patcid_clean_figures')
         if target_canonical:
             for e in patcid_entries.get(pkey, []):
@@ -460,17 +426,17 @@ def main():
                     evidence['unverified'].append({
                         'method': 'patcid_clean_figure', 'page': e['page'], 'bbox': e['bbox'],
                         'confidence': e['confidence'], 'figure_class': e['figure_class'],
-                        'why_unverified': 'PatCID page/bbox의 의미가 figure.csv fig_id와 대응되는지 검증되지 않음',
+                        'why_unverified': 'PatCID page/bbox correspondence to figure.csv fig_id is unverified',
                     })
 
-        # ---------------- 판정 ----------------
+        # ---------------- Classification ----------------
         has_claim_annotation = patent_has_claim_smiles_annotation.get(pid, False)
         has_figure_annotation = patent_has_figure_ocsr_annotation.get(pid, False)
 
         if evidence['claim']:
             in_claim = TRUE
         elif has_claim_annotation:
-            # 이 특허는 청구항 구조 주석이 실제로 있는데 이 분자가 없다 -> 근거 있는 false
+            # Claim annotations exist for this patent but omit the molecule: evidence-backed false.
             in_claim = FALSE
         else:
             in_claim = UNKNOWN
@@ -482,11 +448,11 @@ def main():
         else:
             in_figure = UNKNOWN
 
-        # ---- 등장 횟수 ----
-        # claim_occurrence_count      : 실제로 매칭된 occurrence 수(같은 청구항 안 반복도 각각 1회)
-        # claim_count_with_structure  : 그 구조가 한 번 이상 등장한 '고유 청구항' 수
-        # 존재만 알고 횟수를 셀 수 없는 근거(patent_molecule.location=claim 등)는
-        # 1로 추정하지 않고 null + known_presence_unknown_count 로 남긴다.
+        # ---- Occurrence counts ----
+        # claim_occurrence_count: matched occurrences, counting repetitions within one claim separately.
+        # claim_count_with_structure: unique claims containing the structure at least once.
+        # Presence-only evidence, e.g. patent_molecule.location=claim, cannot establish counts.
+        # Keep null + known_presence_unknown_count instead of assuming 1.
         countable = [e for e in evidence['claim']
                      if e.get('method') in ('claim_element_smiles', 'claims_text_smiles',
                                             'claims_text_inchikey')]
@@ -502,7 +468,7 @@ def main():
                 occurrence_status = ('verified_occurrences' if distinct_claims
                                      else 'verified_occurrences_without_claim_no')
             else:
-                # 존재 근거만 있고 횟수를 셀 수 없는 경우
+                # Presence is known but occurrence count is unavailable.
                 count = None
                 claim_count_with_structure = len(distinct_claims) or None
                 occurrence_status = 'known_presence_unknown_count'
@@ -525,7 +491,7 @@ def main():
             for e in presence_only
         ]
 
-        # 상태 요약 - 왜 unknown인지 이유가 남도록
+        # Summarize status and retain reasons for unknown values.
         if in_claim == TRUE or in_figure == TRUE:
             status = 'verified_' + '_'.join(
                 [x for x in (('claim' if in_claim == TRUE else None),
@@ -545,9 +511,9 @@ def main():
             status = 'unknown_no_location_annotation'
 
         if not has_claim_annotation:
-            evidence['notes'].append('claim_element.element_smiles가 이 특허에 비어 있어 청구항 구조 대조 불가')
+            evidence['notes'].append('claim_element.element_smiles is empty for this patent; claim-structure comparison unavailable')
         if not has_figure_annotation:
-            evidence['notes'].append('figure.ocsr_smiles가 이 특허에 비어 있어 도면 구조 대조 불가')
+            evidence['notes'].append('figure.ocsr_smiles is empty for this patent; figure-structure comparison unavailable')
 
         records.append({
             'patent_id': pid,
@@ -564,11 +530,11 @@ def main():
             'claim_unit_refs': distinct_claims,
             'occurrence_evidence': occurrence_evidence,
             'figure_unit_refs': matched_fig_ids,
-            # DB 내 중복 등장 횟수: patent_molecule.csv에 같은 (patent_id, mol_id)가 몇 행인지.
-            # 청구항 본문 등장 횟수가 아니라 레코드 중복 수다.
+            # DB duplicate count: source patent_molecule.csv rows for the same (patent_id, mol_id).
+            # This counts record duplication, not textual claim occurrences.
             'db_occurrence_count': pair_row_counts[(pid, mid)],
-            # 이 특허에 도면(figure) 행이 존재하는가. 개별 구조가 도면에 그려졌는지(in_figure)와 다르다.
-            # figure.csv에 행이 없으면 '도면 없음'인지 '파싱 안 됨'인지 구분할 수 없어 unknown.
+            # Whether figure rows exist for the patent differs from molecule-level in_figure.
+            # Missing figure.csv rows cannot distinguish absent drawings from unparsed drawings: unknown.
             'figure_exist': TRUE if figures_by_patent.get(pid) else UNKNOWN,
             'figure_row_count': len(figures_by_patent.get(pid) or []),
             'location_status': status,
@@ -576,7 +542,7 @@ def main():
             'source_version': src_version,
         })
 
-    print('[5/5] 저장 및 커버리지 집계...')
+    print('[5/5] Saving and aggregating coverage...')
     os.makedirs(args.out_dir, exist_ok=True)
     out_jsonl = os.path.join(args.out_dir, 'structure_location_metadata.jsonl')
     with open(out_jsonl, 'w', encoding='utf-8') as f:
@@ -613,10 +579,10 @@ def main():
         'evidence_sources_scanned': {
             'ocsr_cache': ocsr_stats,
             'patcid_epo': patcid_stats,
-            'claim_element_smiles': 'claim_element.csv 전수 스캔',
-            'figure_ocsr_smiles': 'figure.csv 전수 스캔',
-            'patent_molecule_location': 'patent_molecule.csv 전수 스캔',
-            'claims_text_extraction': 'patent_content.claims_text 전수 스캔(InChIKey/SMILES)',
+            'claim_element_smiles': 'Full claim_element.csv scan',
+            'figure_ocsr_smiles': 'Full figure.csv scan',
+            'patent_molecule_location': 'Full patent_molecule.csv scan',
+            'claims_text_extraction': 'Full patent_content.claims_text scan (InChIKey/SMILES)',
         },
         'evidence_source_availability': {
             'patents_with_claim_element_smiles_annotation': sum(1 for v in patent_has_claim_smiles_annotation.values() if v),
@@ -630,7 +596,7 @@ def main():
         json.dump(coverage, f, ensure_ascii=False, indent=2)
 
     print(json.dumps(coverage, ensure_ascii=False, indent=2))
-    print(f'\n저장됨: {out_jsonl}\n저장됨: {out_json}')
+    print(f'\nSaved: {out_jsonl}\nSaved: {out_json}')
 
 
 if __name__ == '__main__':

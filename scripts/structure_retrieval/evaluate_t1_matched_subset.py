@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""B2 complete-gold query와 동일한 조건에서 B1 텍스트 검색을 재평가한다.
-
-기존 Qdrant 임베딩을 읽기 전용으로 불러와 query unit과 candidate unit 간
-최대 cosine similarity를 특허 점수로 사용한다. B2와 같은 구조 보유 후보,
-query 부분집합, Top-100 절단, gold 및 평가지표 정의를 유지한다.
-"""
+"""Reevaluate B1 text retrieval under the B2 complete-gold conditions. Read existing Qdrant embeddings without modification and use maximum query-unit/candidate-unit cosine per patent. Match B2 structure-bearing candidates, query subset, Top-100 cutoff, gold, and metric definitions."""
 
 from __future__ import annotations
 
@@ -94,10 +89,10 @@ def parse_source(value: str) -> tuple[str, str, str]:
     collection, colon, unit = remainder.partition(":")
     if not equal_sign or not colon:
         raise argparse.ArgumentTypeError(
-            "--source는 label=collection:unit 형식이어야 합니다"
+            "--source must use label=collection:unit format"
         )
     if not label or not collection or not unit:
-        raise argparse.ArgumentTypeError("--source 값에 빈 항목이 있습니다")
+        raise argparse.ArgumentTypeError("--source contains an empty component")
     return label, collection, unit
 
 
@@ -106,11 +101,11 @@ def load_candidates(path: Path, id_column: str) -> list[str]:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         if id_column not in set(reader.fieldnames or []):
-            raise SystemExit(f"후보 파일에 {id_column!r} 열이 없습니다")
+            raise SystemExit(f"Candidate file lacks {id_column!r} column")
         for row_number, row in enumerate(reader, start=2):
             patent_id = normalize_exact_ep(row.get(id_column))
             if patent_id is None:
-                raise SystemExit(f"잘못된 특허번호: {path}:{row_number}")
+                raise SystemExit(f"Invalid patent identifier: {path}:{row_number}")
             output.add(patent_id)
     return sorted(output)
 
@@ -120,7 +115,7 @@ def load_ground_truth(
     conflict_field: str = "conflict_patents",
 ) -> tuple[dict[str, dict[str, set[str]]], dict[str, str]]:
     if conflict_field not in {"conflict_patents", "x_category_patents"}:
-        raise ValueError(f"지원하지 않는 X-category 필드입니다: {conflict_field}")
+        raise ValueError(f"Unsupported X-category field: {conflict_field}")
     alternate_field = (
         "x_category_patents"
         if conflict_field == "conflict_patents"
@@ -134,37 +129,37 @@ def load_ground_truth(
             row = json.loads(line)
             query_id = normalize_exact_ep(row.get("query_patent_id"))
             if query_id is None:
-                raise SystemExit(f"잘못된 query 특허번호: {path}:{row_number}")
+                raise SystemExit(f"Invalid query patent identifier: {path}:{row_number}")
             if conflict_field not in row:
                 raise SystemExit(
-                    f"지정한 X-category 필드가 없습니다: "
+                    f"Requested X-category field missing: "
                     f"{path}:{row_number}:{conflict_field}"
                 )
             x_raw = row.get(conflict_field) or []
             alternate_raw = row.get(alternate_field) or [] if alternate_field in row else None
             all_raw = row.get("all_cited_patents") or []
             if not isinstance(all_raw, list) or not isinstance(x_raw, list):
-                raise SystemExit(f"정답 목록 형식이 잘못됐습니다: {path}:{row_number}")
+                raise SystemExit(f"Invalid gold-list format: {path}:{row_number}")
             if alternate_raw is not None and not isinstance(alternate_raw, list):
-                raise SystemExit(f"호환 정답 목록 형식이 잘못됐습니다: {path}:{row_number}")
+                raise SystemExit(f"Invalid compatibility gold-list format: {path}:{row_number}")
 
             def normalized(values: list[Any]) -> set[str]:
                 patents = {normalize_exact_ep(value) for value in values}
                 if None in patents:
-                    raise SystemExit(f"잘못된 gold 특허번호: {path}:{row_number}")
+                    raise SystemExit(f"Invalid gold patent identifier: {path}:{row_number}")
                 return {value for value in patents if value is not None}
 
             if query_id in output:
-                raise SystemExit(f"중복 query입니다: {path}:{row_number}:{query_id}")
+                raise SystemExit(f"Duplicate query: {path}:{row_number}:{query_id}")
             all_gold = normalized(all_raw)
             x_gold = normalized(x_raw)
             if alternate_raw is not None and x_gold != normalized(alternate_raw):
                 raise SystemExit(
-                    "X-category 호환 필드 값이 서로 다릅니다: "
+                    "X-category compatibility fields disagree: "
                     f"{path}:{row_number}:{conflict_field}!={alternate_field}"
                 )
             if not x_gold.issubset(all_gold):
-                raise SystemExit(f"X gold가 all gold의 부분집합이 아닙니다: {query_id}")
+                raise SystemExit(f"X gold is not a subset of all gold: {query_id}")
             output[query_id] = {
                 "Citation": all_gold,
                 "Conflict-X": x_gold,
@@ -181,12 +176,12 @@ def load_t2_query_sets(path: Path) -> dict[str, set[str]]:
         reader = csv.DictReader(handle)
         required = {"query_patent_id", "task"}
         if not required.issubset(set(reader.fieldnames or [])):
-            raise SystemExit(f"T2 query 파일의 필수 열이 없습니다: {path}")
+            raise SystemExit(f"Missing required columns in T2 query file: {path}")
         for row in reader:
             query_id = normalize_exact_ep(row.get("query_patent_id"))
             task = str(row.get("task") or "")
             if query_id is None or task not in {"Citation", "Conflict-X"}:
-                raise SystemExit(f"T2 query 행이 잘못됐습니다: {row}")
+                raise SystemExit(f"Invalid T2 query row: {row}")
             output[task].add(query_id)
     return dict(output)
 
@@ -195,22 +190,22 @@ def load_structure_eligible_candidates(
     path: Path,
     candidate_set: set[str],
 ) -> list[str]:
-    """구조 보유 특허를 읽어 B1/B2 공통 후보 마스크를 만든다."""
+    """Read structure-bearing patents to build the common B1/B2 candidate mask."""
     eligible: set[str] = set()
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         required = {"patent_id", "canonical_smiles"}
         missing = required - set(reader.fieldnames or [])
         if missing:
-            raise SystemExit(f"구조 파일에 필수 열이 없습니다: {sorted(missing)}")
+            raise SystemExit(f"Structure file lacks required columns: {sorted(missing)}")
         for row_number, row in enumerate(reader, start=2):
             patent_id = normalize_exact_ep(row.get("patent_id"))
             if patent_id is None:
-                raise SystemExit(f"구조 파일의 특허번호가 잘못됐습니다: {path}:{row_number}")
+                raise SystemExit(f"Invalid patent identifier in structure file: {path}:{row_number}")
             if patent_id in candidate_set and str(row.get("canonical_smiles") or "").strip():
                 eligible.add(patent_id)
     if not eligible:
-        raise SystemExit(f"구조 보유 후보를 찾지 못했습니다: {path}")
+        raise SystemExit(f"No structure-bearing candidates found: {path}")
     return sorted(eligible)
 
 
@@ -219,7 +214,7 @@ def restrict_vectors_to_candidates(
     vectors: Any,
     eligible_candidates: set[str],
 ) -> tuple[list[str], Any]:
-    """Qdrant 벡터를 구조 보유 공통 후보에 맞춰 읽기 전용으로 제한한다."""
+    """Restrict read-only Qdrant vectors to structure-bearing common candidates."""
     import numpy as np
 
     positions = [
@@ -231,7 +226,7 @@ def restrict_vectors_to_candidates(
     missing = eligible_candidates - set(restricted_ids)
     if missing:
         raise SystemExit(
-            "구조 보유 후보 중 텍스트 벡터가 없는 특허가 있습니다: "
+            "Structure-bearing candidates lack text vectors: "
             f"count={len(missing)}, examples={sorted(missing)[:5]}"
         )
     return restricted_ids, np.asarray(vectors)[positions]
@@ -264,18 +259,18 @@ def load_vectors(client: Any, collection: str, unit: str) -> tuple[list[str], An
         for point in points:
             patent_id = normalize_exact_ep(point.payload.get("patent_id"))
             if patent_id is None:
-                raise SystemExit(f"Qdrant에 잘못된 특허번호가 있습니다: {point.id}")
+                raise SystemExit(f"Invalid patent identifier in Qdrant: {point.id}")
             vector = point.vector
             if isinstance(vector, dict):
                 if len(vector) != 1:
-                    raise SystemExit(f"복수 named vector를 자동 선택할 수 없습니다: {collection}")
+                    raise SystemExit(f"Cannot automatically choose among multiple named vectors: {collection}")
                 vector = next(iter(vector.values()))
             patents.append(patent_id)
             vectors.append(vector)
         if offset is None:
             break
     if not vectors:
-        raise SystemExit(f"해당 unit vector가 없습니다: {collection}:{unit}")
+        raise SystemExit(f"Requested unit vector missing: {collection}:{unit}")
     return patents, np.asarray(vectors, dtype=np.float32)
 
 
@@ -295,7 +290,7 @@ def make_rankings(
     vector_patents = set(patent_ids)
     if vector_patents != candidate_set:
         raise SystemExit(
-            "Qdrant vector 특허 집합과 T2 공통 후보 집합이 다릅니다: "
+            "Qdrant patent set differs from T2 common candidates: "
             f"vector_only={len(vector_patents - candidate_set)}, "
             f"candidate_only={len(candidate_set - vector_patents)}"
         )
@@ -317,7 +312,7 @@ def make_rankings(
     for number, query_id in enumerate(query_ids, start=1):
         query_positions = unit_positions.get(query_id)
         if not query_positions:
-            raise SystemExit(f"query vector가 없습니다: {query_id}")
+            raise SystemExit(f"Query vector missing: {query_id}")
         unit_scores = (tensor[query_positions] @ tensor.T).amax(dim=0)
         patent_scores = torch.full(
             (len(candidate_ids),),
@@ -343,7 +338,7 @@ def make_rankings(
             for index in order
         ]
         if number % 100 == 0:
-            print(f"  {number}/{len(query_ids)} query 처리", flush=True)
+            print(f"  {number}/{len(query_ids)} queries processed", flush=True)
     return rankings, selected_device
 
 
@@ -377,7 +372,7 @@ def run_self_test() -> None:
         "EP2A1",
         "EP3A1",
     ]
-    print("자체 검증을 통과했습니다.")
+    print("Self-check passed.")
 
 
 def main() -> int:
@@ -411,14 +406,14 @@ def main() -> int:
         args.output_dir,
     ]
     if any(path is None for path in required) or not args.source:
-        parser.error("qdrant, ground truth, 후보, 구조, B2 query, source, 출력 인자가 필요합니다")
+        parser.error("Require qdrant, ground truth, candidates, structures, B2 queries, source, and output arguments")
     if not args.qdrant_path.is_dir():
-        raise SystemExit(f"Qdrant 디렉터리가 없습니다: {args.qdrant_path}")
+        raise SystemExit(f"Qdrant directory missing: {args.qdrant_path}")
     for path in (args.ground_truth, args.candidate_patents, args.structures, args.t2_per_query):
         if not path.is_file():
-            raise SystemExit(f"입력 파일이 없습니다: {path}")
+            raise SystemExit(f"Input file missing: {path}")
     if args.ranking_limit < 100:
-        parser.error("--ranking-limit은 100 이상이어야 합니다")
+        parser.error("--ranking-limit must be at least 100")
 
     from qdrant_client import QdrantClient
 
@@ -438,7 +433,7 @@ def main() -> int:
     missing_query_candidates = set(query_ids) - eligible_candidate_set
     if missing_query_candidates:
         raise SystemExit(
-            "B2 query 중 구조 보유 공통 후보에 없는 특허가 있습니다: "
+            "B2 query patents are absent from structure-bearing common candidates: "
             f"count={len(missing_query_candidates)}, "
             f"examples={sorted(missing_query_candidates)[:5]}"
         )
@@ -454,14 +449,14 @@ def main() -> int:
         }
         for label, collection, unit in args.source:
             if collection not in available_collections:
-                raise SystemExit(f"Qdrant collection이 없습니다: {collection}")
-            print(f"{label}: {collection}:{unit} vector를 불러옵니다.", flush=True)
+                raise SystemExit(f"Qdrant collection missing: {collection}")
+            print(f"{label}: {collection}:{unit} vectors will be loaded.", flush=True)
             patent_ids, vectors = load_vectors(client, collection, unit)
             full_vector_row_count = len(patent_ids)
             full_vector_patent_count = len(set(patent_ids))
             if set(patent_ids) != set(candidate_ids):
                 raise SystemExit(
-                    "Qdrant vector 특허 집합과 원 공통 후보 집합이 다릅니다: "
+                    "Qdrant patent set differs from the original common candidate set: "
                     f"vector_only={len(set(patent_ids) - set(candidate_ids))}, "
                     f"candidate_only={len(set(candidate_ids) - set(patent_ids))}"
                 )
@@ -562,12 +557,12 @@ def main() -> int:
         "status": "completed",
         "method_group": "text_baseline_matched_subset",
         "candidate_pool_policy": (
-            "GT 등장 특허로 제한된 원 공통 후보 중 B2와 동일한 구조 보유 특허만 "
-            "랭킹하고 자기 특허 제외"
+            "Rank only the B2 structure-bearing subset of the original GT-derived common candidates, "
+            "excluding the query itself"
         ),
-        "candidate_pool_scope": "oracle-derived closed pool; open-corpus 성능이 아님",
-        "score_definition": "query unit과 candidate unit 간 최대 cosine similarity",
-        "query_subset_policy": "B2 per-query 결과에 포함된 complete-gold query만 평가",
+        "candidate_pool_scope": "oracle-derived closed pool; not open-corpus performance",
+        "score_definition": "Maximum cosine between query and candidate units",
+        "query_subset_policy": "Evaluate only complete-gold queries in the B2 per-query results",
         "source_candidate_count": len(candidate_ids),
         "candidate_count": len(eligible_candidate_ids),
         "evaluation_candidate_count": len(eligible_candidate_ids),

@@ -1,18 +1,7 @@
-"""특허 4,123건을 chemrag_patents_v1 컬렉션에 적재한다.
-
-입력 필드 조합별로 dense/sparse 벡터를 각각 저장한다(알고리즘 효과와 입력 필드
-효과를 분리해 평가하기 위함).
-
-  claims_dense / claims_bm25              <- claims_text 만
-  title_claims_dense / title_claims_bm25  <- title + claims_text
-
-  - claims_text가 없으면 특허를 버리지 않고 title만 임베딩하며 missing_claims=true 표시
-  - 포인트 ID: patent_id 기반 UUID5 -> 재실행해도 같은 ID(멱등 upsert)
-  - payload에 embedding_backend/model/version/signature, 필드별 text_hash, source_version 기록
-
-사용법:
-    python3 scripts/qdrant/qdrant_index_patents.py
-    python3 scripts/qdrant/qdrant_index_patents.py --dense-backend static-vectors --recreate
+"""Index 4,123 patents into chemrag_patents_v1. Store field-specific dense/sparse vectors to separate algorithm and input effects:
+claims_dense/claims_bm25 <- claims_text; title_claims_dense/title_claims_bm25 <- title+claims_text.
+Keep title-only patents with missing_claims=true when claims are absent. Use patent_id UUID5 for idempotent upserts. Record embedding_backend/model/version/signature, per-field text_hash, and source_version in payloads.
+Usage: python3 scripts/qdrant/qdrant_index_patents.py [--dense-backend static-vectors --recreate].
 """
 import os
 import sys
@@ -57,7 +46,7 @@ def main():
     ap.add_argument('--dense-backend', default=None)
     ap.add_argument('--dense-model', default=None)
     ap.add_argument('--batch-size', type=int, default=None)
-    ap.add_argument('--limit', type=int, default=None, help='디버그용 - 적재할 특허 수 상한')
+    ap.add_argument('--limit', type=int, default=None, help='Debug limit on patents to index')
     ap.add_argument('--recreate', action='store_true')
     args = ap.parse_args()
 
@@ -71,15 +60,15 @@ def main():
     src_version, src_detail = source_version(src_paths)
     print(f'[source_version] {src_version}')
 
-    print('[1/6] CSV 로딩...')
+    print('[1/6] Loading CSVs...')
     patents = load_csv('patent_content')
     split_rows = {r['id']: r for r in load_csv('split')}
     structure_patents = {r['patent_id'] for r in load_csv('patent_molecule')}
     if args.limit:
         patents = patents[: args.limit]
-    print(f'  patent_content {len(patents)}건, split {len(split_rows)}건, 구조 보유 특허 {len(structure_patents)}건')
+    print(f'  patent_content {len(patents)}; split {len(split_rows)}; structure-bearing patents {len(structure_patents)} records')
 
-    # 필드별 텍스트 준비
+    # Prepare text for each field.
     field_texts = {field: [] for field in TEXT_FIELDS}
     metas = []
     csv_flag_mismatch = 0
@@ -113,19 +102,19 @@ def main():
             'time_cutoff': sp.get('time_cutoff') or None,
             'has_structure': actual_has_structure,
             'has_structure_csv_flag': csv_flag,
-            # claims_text 자체가 비었는지(필드 조합과 무관한 사실)
+            # Whether claims_text itself is empty, independent of the selected field combination.
             'missing_claims': not (r.get('claims_text') or '').strip(),
             'text_hash_claims': text_hash(per_field['claims'][0]),
             'text_hash_title_claims': text_hash(per_field['title_claims'][0]),
-            'text_hash': text_hash(per_field['title_claims'][0]),   # 기본 필드 기준
+            'text_hash': text_hash(per_field['title_claims'][0]),   # Based on the default field.
             'source_version': src_version,
         })
 
     missing_claims_count = sum(1 for m in metas if m['missing_claims'])
-    print(f'  claims_text 없는 특허(제목만 임베딩): {missing_claims_count}건')
-    print(f'  has_structure CSV 플래그와 실제 patent_molecule 연결 불일치: {csv_flag_mismatch}건')
+    print(f'  Patents without claims_text (title-only embeddings): {missing_claims_count} records')
+    print(f'  Mismatches between has_structure CSV flags and actual patent_molecule links: {csv_flag_mismatch} records')
 
-    print('[2/6] 필드별 토큰화 + BM25 학습...')
+    print('[2/6] Tokenizing and fitting BM25 per field...')
     from rag_engine.chemical_tokenizer import ChemicalTokenizer
     tokenizer = ChemicalTokenizer()
     field_tokens = {}
@@ -137,31 +126,31 @@ def main():
         enc.fit(field_texts[field], token_lists=field_tokens[field])
         enc.save(bm25_state_path(field))
         sparse_encoders[field] = enc
-        print(f'  {field}: 토큰화 {time.time()-t_tok:.1f}s, {enc.describe()}')
+        print(f'  {field}: tokenized {time.time()-t_tok:.1f}s, {enc.describe()}')
 
-    print('[3/6] 필드별 dense 인코더 준비...')
+    print('[3/6] Preparing dense encoders per field...')
     dense_encoders = {}
     for field in TEXT_FIELDS:
-        # static-vectors 백엔드는 IDF 가중을 쓰므로 같은 필드의 BM25 IDF를 사용한다
+        # static-vectors uses the same field's BM25 IDF weights.
         dense_encoders[field] = build_dense_encoder(settings, idf_state_path=bm25_state_path(field))
         print(f'  {field}: {dense_encoders[field].describe()}')
 
     dims = {f: e.dim for f, e in dense_encoders.items()}
     if len(set(dims.values())) != 1:
-        raise SystemExit(f'필드별 dense 차원이 다릅니다: {dims}')
+        raise SystemExit(f'Dense dimensions differ across fields: {dims}')
     dense_dim = next(iter(dims.values()))
 
-    print('[4/6] 컬렉션 준비...')
+    print('[4/6] Preparing collections...')
     client = get_client(settings)
     coll_report = ensure_patent_collection(client, settings, dense_dim, recreate=args.recreate)
     print(f'  {coll_report["collection"]} (mode={"local" if is_local_mode(settings) else "server"}) dim={dense_dim}')
 
-    # 서명/벡터 이름은 포인트마다 계산하면 매우 느리므로 한 번만 계산해 재사용한다
+    # Compute signatures/vector names once rather than for each point.
     signature_by_field = {f: dense_encoders[f].signature() for f in TEXT_FIELDS}
     vector_field_names = {f: dict(TEXT_FIELDS[f]) for f in TEXT_FIELDS}
-    print(f'  인코더 서명: {signature_by_field}')
+    print(f'  Encoder signatures: {signature_by_field}')
 
-    print('[5/6] 적재...')
+    print('[5/6] Indexing...')
     t0 = time.time()
     batch = settings.batch_size
     total = 0
@@ -199,7 +188,7 @@ def main():
         client.upsert(settings.patents_collection, points=points, wait=True)
         total += len(points)
         if (start // batch) % 8 == 0:
-            print(f'  {total}/{len(metas)} 적재 ({time.time() - t0:.1f}s)')
+            print(f'  {total}/{len(metas)} indexed ({time.time() - t0:.1f}s)')
 
     count = client.count(settings.patents_collection).count
     summary = {
@@ -218,9 +207,9 @@ def main():
     out = os.path.join(DERIVED_DIR, 'qdrant_index_patents_report.json')
     with open(out, 'w', encoding='utf-8') as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
-    print('[6/6] 완료')
+    print('[6/6] Complete')
     print(json.dumps({k: v for k, v in summary.items() if k != 'provenance'}, ensure_ascii=False, indent=2))
-    print(f'\n저장됨: {out}')
+    print(f'\nSaved: {out}')
 
 
 if __name__ == '__main__':

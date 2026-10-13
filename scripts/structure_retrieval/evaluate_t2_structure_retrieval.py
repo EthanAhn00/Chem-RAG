@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""SMILES 기반 Morgan 특허 벡터로 T2 structure-only 검색을 평가한다.
-
-각 특허의 유효한 canonical SMILES를 Morgan binary fingerprint로 변환하고,
-구조별 fingerprint 평균을 L2 정규화한 특허 벡터 하나로 집계한다. 특허 간
-점수는 이 벡터의 cosine similarity이다. 이 점수는 분자쌍 최대 Tanimoto가
-아니며, 대용량 구조 집합에 대한 재현 가능한 1차 기준선으로 사용한다.
-"""
+"""Evaluate T2 using SMILES-based Morgan patent vectors. Convert valid canonical SMILES to binary Morgan fingerprints, average them per patent and L2-normalize. Rank by patent-vector cosine, not maximum molecule-pair Tanimoto; a reproducible initial baseline for large structure sets."""
 
 from __future__ import annotations
 
@@ -25,20 +19,20 @@ EP_EXACT_RE = re.compile(r"^EP(\d+)([A-Z]\d?)$")
 DEFAULT_KS = (1, 5, 10, 50, 100)
 METRIC_DEFINITIONS = {
     "R@k": (
-        "query별 Top-k 안에서 검색된 gold 수를 해당 query의 전체 gold 수로 나눈 뒤 "
-        "query 평균"
+        "Per-query retrieved gold in Top-k divided by all query gold, then "
+        "averaged over queries"
     ),
     "MRR@100": (
-        "Top-100 안의 첫 gold 순위의 역수이며, Top-100 안에 gold가 없으면 0인 "
-        "query별 값을 평균"
+        "Reciprocal rank of the first gold in Top-100, or zero when absent, "
+        "averaged over queries"
     ),
     "MAP@100": (
-        "Top-100 안의 각 gold 위치에서 precision을 합산하고 해당 query의 전체 gold 수로 "
-        "나눈 AP@100의 query 평균; cutoff 밖 gold도 분모에 포함"
+        "Sum precision at gold ranks within Top-100 and divide by all query gold; "
+        "average AP@100 over queries, including beyond-cutoff gold in the denominator"
     ),
     "nDCG@10": (
-        "binary relevance DCG@10을 전체 gold 수와 cutoff 10으로 계산한 이상적 DCG로 "
-        "정규화한 query별 값의 평균"
+        "Normalize binary DCG@10 by ideal DCG from total gold and cutoff 10, "
+        "then average over queries"
     ),
 }
 
@@ -96,17 +90,17 @@ def load_candidates(path: Path, id_column: str) -> list[str]:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         if not reader.fieldnames or id_column not in reader.fieldnames:
-            raise SystemExit(f"후보 파일에 {id_column!r} 열이 없습니다: {path}")
+            raise SystemExit(f"Candidate file lacks {id_column!r} column missing: {path}")
         for row_number, row in enumerate(reader, start=2):
             patent_id = normalize_exact_ep(row.get(id_column))
             if patent_id is None:
                 raise SystemExit(
-                    f"kind code를 포함한 EP 특허번호가 아닙니다: "
+                    f"Not an EP publication identifier with a kind code: "
                     f"{path}:{row_number}:{row.get(id_column)!r}"
                 )
             candidates.add(patent_id)
     if not candidates:
-        raise SystemExit(f"후보 특허가 없습니다: {path}")
+        raise SystemExit(f"No candidate patents: {path}")
     return sorted(candidates)
 
 
@@ -115,7 +109,7 @@ def load_ground_truth(
     conflict_field: str = "conflict_patents",
 ) -> tuple[dict[str, dict[str, set[str]]], dict[str, str]]:
     if conflict_field not in {"conflict_patents", "x_category_patents"}:
-        raise ValueError(f"지원하지 않는 X-category 필드입니다: {conflict_field}")
+        raise ValueError(f"Unsupported X-category field: {conflict_field}")
     alternate_field = (
         "x_category_patents"
         if conflict_field == "conflict_patents"
@@ -130,20 +124,20 @@ def load_ground_truth(
             query_id = normalize_exact_ep(row.get("query_patent_id"))
             if query_id is None:
                 raise SystemExit(
-                    f"유효하지 않은 query 특허번호: {path}:{row_number}"
+                    f"Invalid query patent identifier: {path}:{row_number}"
                 )
             all_raw = row.get("all_cited_patents") or []
             if conflict_field not in row:
                 raise SystemExit(
-                    f"지정한 X-category 필드가 없습니다: "
+                    f"Requested X-category field missing: "
                     f"{path}:{row_number}:{conflict_field}"
                 )
             x_raw = row.get(conflict_field) or []
             alternate_raw = row.get(alternate_field) or [] if alternate_field in row else None
             if not isinstance(all_raw, list) or not isinstance(x_raw, list):
-                raise SystemExit(f"정답 목록 형식이 잘못됐습니다: {path}:{row_number}")
+                raise SystemExit(f"Invalid gold-list format: {path}:{row_number}")
             if alternate_raw is not None and not isinstance(alternate_raw, list):
-                raise SystemExit(f"호환 정답 목록 형식이 잘못됐습니다: {path}:{row_number}")
+                raise SystemExit(f"Invalid compatibility gold-list format: {path}:{row_number}")
 
             def normalize_list(values: list[Any], label: str) -> set[str]:
                 output: set[str] = set()
@@ -151,7 +145,7 @@ def load_ground_truth(
                     patent_id = normalize_exact_ep(value)
                     if patent_id is None:
                         raise SystemExit(
-                            f"유효하지 않은 {label} 특허번호: "
+                            f"Invalid {label} patent identifier: "
                             f"{path}:{row_number}:{value!r}"
                         )
                     output.add(patent_id)
@@ -160,16 +154,16 @@ def load_ground_truth(
             all_gold = normalize_list(all_raw, "all gold")
             x_gold = normalize_list(x_raw, "X gold")
             if alternate_raw is not None:
-                alternate_gold = normalize_list(alternate_raw, "호환 X gold")
+                alternate_gold = normalize_list(alternate_raw, "compatibility X gold")
                 if x_gold != alternate_gold:
                     raise SystemExit(
-                        "X-category 호환 필드 값이 서로 다릅니다: "
+                        "X-category compatibility fields disagree: "
                         f"{path}:{row_number}:{conflict_field}!={alternate_field}"
                     )
             if not x_gold.issubset(all_gold):
-                raise SystemExit(f"X gold가 all gold의 부분집합이 아닙니다: {query_id}")
+                raise SystemExit(f"X gold is not a subset of all gold: {query_id}")
             if query_id in ground_truth:
-                raise SystemExit(f"중복 query입니다: {query_id}")
+                raise SystemExit(f"Duplicate query: {query_id}")
             ground_truth[query_id] = {"Citation": all_gold, "Conflict-X": x_gold}
     return ground_truth, {
         "Citation": "all_cited_patents",
@@ -190,7 +184,7 @@ def load_structure_sets(
         required = {"patent_id", smiles_column}
         missing = required - set(reader.fieldnames or [])
         if missing:
-            raise SystemExit(f"구조 파일에 필수 열이 없습니다: {sorted(missing)}")
+            raise SystemExit(f"Structure file lacks required columns: {sorted(missing)}")
         for row in reader:
             counts["input_rows"] += 1
             patent_id = normalize_exact_ep(row.get("patent_id"))
@@ -253,7 +247,7 @@ def build_patent_vectors(
         structure_counts[positions] += 1
         if number % 10000 == 0:
             print(
-                f"  Morgan fingerprint {number}/{len(smiles_patents)}개 처리",
+                f"  Morgan fingerprint {number}/{len(smiles_patents)} processed",
                 flush=True,
             )
 
@@ -286,14 +280,14 @@ def score_matrix(vectors: Any, query_positions: list[int], device: str) -> tuple
         try:
             import torch
         except ImportError as exc:
-            raise SystemExit("--device cuda에는 PyTorch가 필요합니다") from exc
+            raise SystemExit("--device cuda requires PyTorch") from exc
         query_tensor = torch.from_numpy(vectors[query_positions]).to("cuda")
         candidate_tensor = torch.from_numpy(vectors).to("cuda")
         scores = (query_tensor @ candidate_tensor.T).cpu().numpy()
         del query_tensor, candidate_tensor
         return scores, "cuda"
     if selected_device != "cpu":
-        raise SystemExit("--device는 auto, cpu, cuda 중 하나여야 합니다")
+        raise SystemExit("--device must be auto, cpu, or cuda")
     return np.asarray(vectors[query_positions] @ vectors.T), "cpu"
 
 
@@ -427,7 +421,7 @@ def run_self_test() -> None:
         100,
     )
     assert [patent_id for patent_id, _ in tied] == ["EP1A1", "EP2A1"]
-    print("자체 검증을 통과했습니다.")
+    print("Self-check passed.")
 
 
 def main() -> int:
@@ -439,7 +433,7 @@ def main() -> int:
     parser.add_argument(
         "--smiles-column",
         default="canonical_smiles",
-        help="구조 파일에서 fingerprint 입력으로 사용할 SMILES 열",
+        help="SMILES column used for fingerprint inputs in the structure file",
     )
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--fingerprint-radius", type=int, default=2)
@@ -465,14 +459,14 @@ def main() -> int:
     }
     missing_arguments = [name for name, value in required.items() if value is None]
     if missing_arguments:
-        parser.error(f"필수 인자가 없습니다: {', '.join(missing_arguments)}")
+        parser.error(f"Missing required arguments: {', '.join(missing_arguments)}")
     missing_files = [str(path) for path in required.values() if path != args.output_dir and not path.is_file()]
     if missing_files:
-        raise SystemExit(f"입력 파일이 없습니다: {missing_files}")
+        raise SystemExit(f"Input file missing: {missing_files}")
     if args.fingerprint_radius < 1 or args.fingerprint_bits < 128:
-        parser.error("fingerprint 설정값을 확인하세요")
+        parser.error("Check fingerprint settings")
     if args.ranking_limit < max(DEFAULT_KS):
-        parser.error(f"--ranking-limit은 {max(DEFAULT_KS)} 이상이어야 합니다")
+        parser.error(f"--ranking-limit must be {max(DEFAULT_KS)} or greater")
 
     started_at = time.perf_counter()
     candidate_ids = load_candidates(args.candidate_patents, args.candidate_id_column)
@@ -487,7 +481,7 @@ def main() -> int:
         args.smiles_column,
     )
     print(
-        f"후보 {len(candidate_ids)}개, 구조 보유 특허 {len(structures)}개를 불러왔습니다.",
+        f"Candidates: {len(candidate_ids)}; structure-bearing patents {len(structures)} loaded.",
         flush=True,
     )
 
@@ -626,23 +620,23 @@ def main() -> int:
         "status": "completed",
         "method": "mean_morgan_cosine",
         "method_key": "mean_morgan_cosine",
-        "display_name": "Morgan fingerprint 특허 평균 cosine",
+        "display_name": "Patent-mean Morgan fingerprint cosine",
         "score_definition": (
-            f"{args.smiles_column} 열의 각 SMILES를 Morgan binary fingerprint로 변환해 "
-            "특허별로 평균한 뒤 L2 정규화한 벡터 간 cosine similarity"
+            f"{args.smiles_column} column SMILES -> Morgan binary fingerprints, "
+            "averaged per patent and L2-normalized; score by vector cosine similarity"
         ),
         "not_molecular_pair_max_tanimoto": True,
         "candidate_pool_policy": (
-            "GT 등장 특허로 제한된 원 공통 후보 중 구조 보유 특허; 자기 특허 제외; "
-            "구조 미보유 특허는 0점으로 대체하지 않고 랭킹에서 제외"
+            "Structure-bearing patents in original GT-derived common candidates; self excluded; "
+            "exclude missing-structure patents rather than assigning zero scores"
         ),
-        "candidate_pool_scope": "oracle-derived closed pool; open-corpus 성능이 아님",
+        "candidate_pool_scope": "oracle-derived closed pool; not open-corpus performance",
         "evaluation_subset_policy": (
-            "query와 해당 task의 모든 gold가 구조를 보유한 complete-gold query만 평가"
+            "Evaluate only complete-gold queries with structures for the query and all task-specific gold"
         ),
         "metric_compatibility": (
-            "T1과 같은 R@1/5/10/50/100, MRR@100, MAP@100, binary nDCG@10 공식; "
-            "T1 전체 query 집계와는 직접 비교하지 않고 동일 complete-gold subset을 재집계해야 함"
+            "Same R@1/5/10/50/100, MRR@100, MAP@100, binary nDCG@10 formulas as T1; "
+            "reaggregate T1 on the identical complete-gold subset rather than comparing all-query summaries"
         ),
         "metric_definitions": METRIC_DEFINITIONS,
         "source_candidate_count": len(candidate_ids),

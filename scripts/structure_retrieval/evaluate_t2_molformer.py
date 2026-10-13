@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""MoLFormer 분자 embedding을 특허별로 평균하여 T2를 평가한다.
-
-사전점검을 통과한 non-isomeric canonical SMILES만 입력으로 사용한다.
-각 분자는 고정된 MoLFormer checkpoint의 pooler output으로 표현하고, 특허별
-고유 분자 embedding을 평균한 뒤 L2 정규화한다. 특허 간 cosine
-similarity로 순위를 산출한다.
-"""
+"""Evaluate T2 using patent-mean MoLFormer molecule embeddings. Use only prechecked non-isomeric canonical SMILES, represent molecules with the fixed checkpoint's pooler output, average unique molecular embeddings per patent, L2-normalize, and rank by patent cosine similarity."""
 
 from __future__ import annotations
 
@@ -69,7 +63,7 @@ def load_prepared_structures(
         required = {"patent_id", "model_smiles", "token_count"}
         missing = required - set(reader.fieldnames or [])
         if missing:
-            raise SystemExit(f"MoLFormer 입력의 필수 열이 없습니다: {sorted(missing)}")
+            raise SystemExit(f"Missing required MoLFormer input columns: {sorted(missing)}")
         for row_number, row in enumerate(reader, start=2):
             counts["input_rows"] += 1
             patent_id = str(row.get("patent_id") or "").strip()
@@ -78,13 +72,13 @@ def load_prepared_structures(
                 counts["outside_candidate_rows"] += 1
                 continue
             if not smiles:
-                raise SystemExit(f"빈 MoLFormer SMILES입니다: {path}:{row_number}")
+                raise SystemExit(f"Empty MoLFormer SMILES: {path}:{row_number}")
             try:
                 token_count = int(row["token_count"])
             except (TypeError, ValueError) as exc:
-                raise SystemExit(f"token 수가 잘못됐습니다: {path}:{row_number}") from exc
+                raise SystemExit(f"Invalid token count: {path}:{row_number}") from exc
             if token_count < 1:
-                raise SystemExit(f"token 수가 1보다 작습니다: {path}:{row_number}")
+                raise SystemExit(f"Token count below 1: {path}:{row_number}")
             before = len(structures[patent_id])
             structures[patent_id].add(smiles)
             if len(structures[patent_id]) == before:
@@ -107,7 +101,7 @@ def verify_input_manifest(
     with manifest_path.open("r", encoding="utf-8") as handle:
         manifest = json.load(handle)
     if manifest.get("status") != "completed":
-        raise SystemExit("MoLFormer 입력 manifest가 완료 상태가 아닙니다")
+        raise SystemExit("MoLFormer input manifest is not completed")
     checks = {
         "model_id": (manifest.get("model_id"), model_id),
         "resolved_revision": (manifest.get("resolved_revision"), revision),
@@ -137,7 +131,7 @@ def verify_input_manifest(
         }
     if mismatches:
         raise SystemExit(
-            "MoLFormer 사전점검 조건이 실행 조건과 다릅니다: "
+            "MoLFormer precheck conditions differ from execution settings: "
             + json.dumps(mismatches, ensure_ascii=False, sort_keys=True)
         )
     return manifest
@@ -151,9 +145,9 @@ def resolve_and_hash_model_files(
 
     resolved_revision = str(HfApi().model_info(model_id, revision=revision).sha or "")
     if not resolved_revision:
-        raise SystemExit("Hugging Face checkpoint revision을 확인하지 못했습니다")
+        raise SystemExit("Could not verify the Hugging Face checkpoint revision")
     if len(revision) == 40 and resolved_revision != revision:
-        raise SystemExit(f"checkpoint revision이 다릅니다: {revision} != {resolved_revision}")
+        raise SystemExit(f"Checkpoint revision mismatch: {revision} != {resolved_revision}")
     files: dict[str, dict[str, Any]] = {}
     for filename in (
         "config.json",
@@ -190,9 +184,9 @@ def encode_molecules(
     from transformers import AutoModel, AutoTokenizer
 
     if device == "cuda" and not torch.cuda.is_available():
-        raise SystemExit("CUDA를 사용할 수 없습니다")
+        raise SystemExit("CUDA is unavailable")
     if device not in {"cpu", "cuda"}:
-        raise SystemExit("--device는 cpu 또는 cuda여야 합니다")
+        raise SystemExit("--device must be cpu or cuda")
 
     torch.manual_seed(0)
     if torch.cuda.is_available():
@@ -230,23 +224,23 @@ def encode_molecules(
             observed_max_tokens = max(observed_max_tokens, batch_max_tokens)
             if batch_max_tokens > maximum_tokens:
                 raise SystemExit(
-                    f"사전점검 상한을 넘는 입력이 있습니다: {batch_max_tokens}"
+                    f"Input exceeds the prechecked limit: {batch_max_tokens}"
                 )
             encoded = {key: value.to(device) for key, value in encoded.items()}
             outputs = model(**encoded)
             pooled = getattr(outputs, "pooler_output", None)
             if pooled is None or pooled.ndim != 2:
-                raise SystemExit("MoLFormer pooler_output을 확인하지 못했습니다")
+                raise SystemExit("MoLFormer pooler_output is unavailable")
             if pooler_verification is None:
                 last_hidden_state = getattr(outputs, "last_hidden_state", None)
                 if last_hidden_state is None or last_hidden_state.ndim != 3:
                     raise SystemExit(
-                        "MoLFormer last_hidden_state를 확인하지 못해 pooling을 검증할 수 없습니다"
+                        "MoLFormer last_hidden_state is unavailable; pooling cannot be verified"
                     )
                 attention_mask = encoded.get("attention_mask")
                 if attention_mask is None:
                     raise SystemExit(
-                        "attention_mask가 없어 MoLFormer pooling을 검증할 수 없습니다"
+                        "attention_mask is unavailable; MoLFormer pooling cannot be verified"
                     )
                 expanded_mask = attention_mask.unsqueeze(-1).to(
                     dtype=last_hidden_state.dtype
@@ -271,7 +265,7 @@ def encode_molecules(
                     "checked_on_first_batch": True,
                     "batch_size": len(batch),
                     "comparison": (
-                        "pooler_output과 last_hidden_state의 attention-mask 평균 직접 비교"
+                        "Direct comparison of pooler_output with the attention-mask mean of last_hidden_state"
                     ),
                     "allclose": matches,
                     "absolute_tolerance": absolute_tolerance,
@@ -280,17 +274,17 @@ def encode_molecules(
                 }
                 if not matches:
                     raise SystemExit(
-                        "MoLFormer pooler_output이 attention-mask 평균과 일치하지 않습니다: "
+                        "MoLFormer pooler_output differs from the attention-mask mean: "
                         f"max_abs_diff={maximum_absolute_difference}"
                     )
             chunk = pooled.detach().to("cpu", dtype=torch.float32).numpy()
             if not np.isfinite(chunk).all():
-                raise SystemExit("MoLFormer embedding에 유한하지 않은 값이 있습니다")
+                raise SystemExit("MoLFormer embeddings contain nonfinite values")
             chunks.append(chunk)
             completed = min(start + batch_size, len(smiles_values))
             if completed % 5000 < batch_size or completed == len(smiles_values):
                 print(
-                    f"  MoLFormer embedding {completed}/{len(smiles_values)}개 처리",
+                    f"  MoLFormer embedding {completed}/{len(smiles_values)} processed",
                     flush=True,
                 )
     embeddings = np.concatenate(chunks, axis=0).astype(np.float32, copy=False)
@@ -331,7 +325,7 @@ def aggregate_patent_vectors(
     usable = norms > 0
     sums[usable] /= norms[usable, None]
     if not np.isfinite(sums[usable]).all():
-        raise SystemExit("특허 embedding에 유한하지 않은 값이 있습니다")
+        raise SystemExit("Patent embeddings contain nonfinite values")
     return sums, counts
 
 
@@ -364,7 +358,7 @@ def run_self_test() -> None:
     )
     assert ranking[0][0] == "EP3A1"
     assert all(patent_id != "EP1A1" for patent_id, _ in ranking)
-    print("자체 검증을 통과했습니다.")
+    print("Self-check passed.")
 
 
 def main() -> int:
@@ -399,7 +393,7 @@ def main() -> int:
     }
     missing_arguments = [name for name, value in required.items() if value is None]
     if missing_arguments:
-        parser.error(f"필수 인자가 없습니다: {', '.join(missing_arguments)}")
+        parser.error(f"Missing required arguments: {', '.join(missing_arguments)}")
     input_paths = [
         args.ground_truth,
         args.candidate_patents,
@@ -408,11 +402,11 @@ def main() -> int:
     ]
     missing_files = [str(path) for path in input_paths if not path.is_file()]
     if missing_files:
-        raise SystemExit(f"입력 파일이 없습니다: {missing_files}")
+        raise SystemExit(f"Input file missing: {missing_files}")
     if args.maximum_tokens < 1 or args.batch_size < 1:
-        parser.error("token 상한과 batch 크기는 1 이상이어야 합니다")
+        parser.error("Token limit and batch size must be at least 1")
     if args.ranking_limit < max(DEFAULT_KS):
-        parser.error(f"--ranking-limit은 {max(DEFAULT_KS)} 이상이어야 합니다")
+        parser.error(f"--ranking-limit must be {max(DEFAULT_KS)} or greater")
 
     started_at = time.perf_counter()
     input_manifest = verify_input_manifest(
@@ -440,8 +434,8 @@ def main() -> int:
         {smiles for patent_smiles in structures.values() for smiles in patent_smiles}
     )
     print(
-        f"후보 {len(candidate_ids)}개, 구조 보유 특허 {len(structures)}개, "
-        f"고유 SMILES {len(smiles_values)}개를 불러왔습니다.",
+        f"Candidates: {len(candidate_ids)}; structure-bearing patents {len(structures)}; "
+        f"unique SMILES {len(smiles_values)} loaded.",
         flush=True,
     )
 
@@ -579,12 +573,12 @@ def main() -> int:
         "status": "completed",
         "method": "molformer_mean_pooling",
         "method_key": "molformer_mean_pooling",
-        "display_name": "MoLFormer 분자 embedding 특허 평균 cosine",
+        "display_name": "Patent-mean MoLFormer molecule-embedding cosine",
         "score_definition": (
-            "고정 revision의 MoLFormer pooler_output을 분자 embedding으로 사용한다. "
-            "실행 첫 batch에서 pooler_output이 last_hidden_state의 attention-mask 평균과 "
-            "일치하는지 직접 검증하고, 특허별 고유 분자 embedding을 단순 평균한 뒤 "
-            "L2 정규화한 cosine similarity를 사용한다."
+            "Use pooler_output from the fixed MoLFormer revision for molecule embeddings. "
+            "In the first batch, verify it against the attention-mask mean of last_hidden_state. "
+            "Average unique molecular embeddings per patent, then "
+            "L2-normalize and compare by cosine similarity."
         ),
         "model_id": args.model_id,
         "requested_revision": args.revision,
@@ -592,14 +586,14 @@ def main() -> int:
         "model_files": model_files,
         "model_input_policy": input_manifest.get("smiles_policy"),
         "maximum_tokens": args.maximum_tokens,
-        "patent_aggregation": "특허별 고유 분자 embedding 단순 평균 후 L2 정규화",
+        "patent_aggregation": "Mean of unique molecule embeddings per patent, followed by L2 normalization",
         "candidate_pool_policy": (
-            "GT 등장 특허로 제한된 원 공통 후보 중 MoLFormer 입력 구조 "
-            "보유 특허만 랭킹하고 자기 특허 제외"
+            "Within original GT-derived common candidates, rank only patents "
+            "with eligible MoLFormer structures and exclude self"
         ),
-        "candidate_pool_scope": "oracle-derived closed pool; open-corpus 성능이 아님",
+        "candidate_pool_scope": "oracle-derived closed pool; not open-corpus performance",
         "evaluation_subset_policy": (
-            "query와 해당 task의 모든 gold가 MoLFormer 입력 구조를 보유한 query"
+            "Queries whose own patent and every task-specific gold patent have eligible MoLFormer structures"
         ),
         "source_candidate_count": len(candidate_ids),
         "candidate_count": len(usable_patents),

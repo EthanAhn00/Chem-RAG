@@ -8,10 +8,10 @@ import time
 
 
 def _has_kind_code(s):
-    # 'EP-4013497-B1'(대시 포함), 'EP07075413NWB1'(NW variant) 등 식별자 포맷이
-    # 여러 가지라 단순 정규식 하나로는 오탐/누락이 생김 - clean_ep_number()와 동일한
-    # 두 단계 스트리핑을 적용해봐서 실제로 뭔가 제거됐으면(=kind code/NW 접미사가
-    # 있었으면) kind-coded로 판정
+    # Identifier formats include 'EP-4013497-B1' and NW variants such as 'EP07075413NWB1'.
+    # A single regex can miss or misclassify these; use the same two-stage stripping
+    # as clean_ep_number(). If a kind-code/NW suffix was actually removed,
+    # classify the identifier as kind-coded.
     s2 = str(s).strip().replace('EP', '').replace('-', '')
     stripped = re.sub(r'(NWA|NWB|NW)\d*$', '', s2)
     stripped = re.sub(r'[A-Z]\d*$', '', stripped)
@@ -19,11 +19,8 @@ def _has_kind_code(s):
 
 
 def normalize_patent_number(patent_number):
-    """서로 다른 출처의 포맷을 같은 키로 조인할 수 있도록 EP 특허번호를 순수 숫자
-    문자열로 정규화. 예:
-      'EP-4013497-B1' (SureChEMBL 포맷)  -> '4013497'
-      'EP3315022A1'   (T_id/P_id 포맷)   -> '3315022'
-    숫자를 찾지 못하면 None 반환
+    """Normalize EP identifiers to numeric strings for cross-source joins.
+    Examples: 'EP-4013497-B1' (SureChEMBL) -> '4013497'; 'EP3315022A1' (T_id/P_id) -> '3315022'. Return None when no number is found.
     """
     if not patent_number:
         return None
@@ -32,8 +29,7 @@ def normalize_patent_number(patent_number):
 
 
 def get_best_clean_smiles(patcid_entry):
-    """patcid_annotations_map[clean_id] 항목에서 PatCID가 이미 인식해둔 고신뢰
-    SMILES(class='Clean') 중 confidence가 가장 높은 것을 선택. 없으면 None"""
+    """Choose the highest-confidence PatCID SMILES with class='Clean' from patcid_annotations_map[clean_id]. Return None if unavailable."""
     if not patcid_entry:
         return None
     candidates = patcid_entry.get('clean_smiles_candidates') or []
@@ -43,11 +39,8 @@ def get_best_clean_smiles(patcid_entry):
 
 
 class PatCIDSureChEMBLConnector:
-    """PatCID(IBM Deep Search / Nature 2024)와 SureChEMBL(EMBL-EBI / NAR 2016)을 위한 이중 커넥터
-    Section C 특허 레코드를 화학 SMILES, InChIKey, PatCID 2D 이미지 주석과 연결
-
-    조회는 순차 레코드 id/파일명이 아니라 실제 EP 특허번호(예: 'EP3315022A1') 기준
-    (EPOStreamParser / config.settings.ID_PATENT_MAP_PATH 참고)
+    """Dual connector for PatCID (IBM Deep Search / Nature 2024) and SureChEMBL (EMBL-EBI / NAR 2016).
+    Link Section C records to SMILES, InChIKey, and PatCID 2D image annotations using actual EP publication numbers (e.g. 'EP3315022A1'), not sequential IDs or filenames. See EPOStreamParser and config.settings.ID_PATENT_MAP_PATH.
     """
 
     def __init__(self, local_db_dir=None):
@@ -62,7 +55,7 @@ class PatCIDSureChEMBLConnector:
         self.surechembl_ftp_url = 'https://ftp.ebi.ac.uk/pub/databases/chembl/SureChEMBL/'
         self.surechembl_api_base = 'https://www.ebi.ac.uk/chembl/api/data'
 
-        # 키는 normalize_patent_number()로 정규화한 특허번호
+        # Keys are patent numbers normalized by normalize_patent_number().
         self.local_chem_map = {}
         self.patcid_annotations_map = {}
         self._load_local_db_dumps()
@@ -71,7 +64,7 @@ class PatCIDSureChEMBLConnector:
         if not os.path.exists(self.local_db_dir):
             return
 
-        # 1. SureChEMBL Map (.txt.gz) 파싱
+        # 1. Parse the SureChEMBL map (.txt.gz).
         try:
             entries = list(os.scandir(self.local_db_dir))
             for entry in entries:
@@ -102,7 +95,7 @@ class PatCIDSureChEMBLConnector:
         except Exception as e:
             print(f'Error loading SureChEMBL dump: {e}')
 
-        # 2. 압축 해제된 PatCID Nature 2024 JSONL 폴더(patcid/) 파싱
+        # 2. Parse the extracted PatCID Nature 2024 JSONL directory (patcid/).
         patcid_dir = os.path.join(self.local_db_dir, 'patcid')
         if not os.path.exists(patcid_dir):
             for root, dirs, files in os.walk(self.local_db_dir):
@@ -121,21 +114,21 @@ class PatCIDSureChEMBLConnector:
                             identifiers = item.get('patent', {}).get('identifiers', [])
                             figures = item.get('figures', [])
 
-                            # class='Clean'(단일 분자로 인식됨) + smiles 필드가 있으면 PatCID가
-                            # 이미 자체 OCSR로 계산해둔 값 - 우리가 다시 크롭+인식할 필요 없음.
-                            # Markush(가변 치환기 템플릿)/Trash(오탐)는 smiles 없음.
-                            # figures[:5]로 자르기 전에(뒤쪽 인덱스에 있을 수 있어) 전체를 훑어야 함
+                            # class='Clean' with smiles identifies a single molecule already recognized
+                            # by PatCID OCSR; no additional cropping/recognition is needed.
+                            # Markush templates and Trash false detections have no SMILES.
+                            # Scan all figures before truncating to figures[:5]; useful entries may occur later.
                             clean_smiles_candidates = [
                                 {'smiles': fig['smiles']['value'], 'confidence': fig['smiles'].get('confidence'), 'page': fig.get('page')}
                                 for fig in figures
                                 if fig.get('class') == 'Clean' and isinstance(fig.get('smiles'), dict) and fig['smiles'].get('value')
                             ]
 
-                            # identifiers에는 kind code 포함 별칭('EP9290223A1')과 없는 별칭
-                            # ('EP9290223')이 섞여 있고 둘 다 같은 clean_id로 정규화됨. 이 item의
-                            # figures/bbox는 kind code가 붙은 특정 공보 기준이라, kind code 없는
-                            # 별칭이 나중에 순회되며 덮어쓰면 잘못된 공보를 가리키게 됨(과거 버그) -
-                            # kind-coded 별칭을 우선 선택하고 아래에서도 이를 보존
+                            # Identifiers mix kind-coded aliases ('EP9290223A1') and bare aliases
+                            # ('EP9290223'), both normalized to one clean_id. The item's figures/bbox
+                            # refer to a particular kind-coded publication; a later bare alias must not
+                            # overwrite it and point to the wrong publication (a previous bug).
+                            # Prefer kind-coded aliases and preserve this preference below.
                             preferred_ident = next(
                                 (i for i in identifiers if _has_kind_code(i)),
                                 (identifiers[0] if identifiers else None)
@@ -155,8 +148,8 @@ class PatCIDSureChEMBLConnector:
                                     'figure_count': len(figures),
                                     'has_markush': any(fig.get('class') == 'Markush' for fig in figures),
                                     'clean_smiles_candidates': clean_smiles_candidates,
-                                    # 페이지별 실제 크기(인치) - bbox를 픽셀로 환산할 때 필요
-                                    # (vision_ocsr/patcid_bbox_cropper.py, 현재 비활성 경로)
+                                    # Actual page dimensions in inches, needed to convert bounding boxes to pixels.
+                                    # Used by vision_ocsr/patcid_bbox_cropper.py (currently inactive).
                                     'page_dimensions': item.get('page-dimensions', []),
                                     'source': 'PatCID Nature 2024 (IBM Deep Search 33.2GB Dataset)'
                                 }
@@ -165,14 +158,11 @@ class PatCIDSureChEMBLConnector:
                     print(f'Error parsing PatCID EPO JSONL: {e}')
 
     def fetch_surechembl_compound_by_patent(self, patent_id, allow_remote=False):
-        """실제 EP 특허번호(예: 'EP3315022A1')로 SMILES/InChIKey 조회
-
-        반환 status:
-          - 'LOCAL_DB_MATCH'  : 로컬 SureChEMBL 맵에서 발견
-          - 'REMOTE_MATCH'    : SureChEMBL REST API로 발견(allow_remote=True일 때만)
-          - 'NOT_FOUND'       : 화학구조 데이터 없음, smiles_list는 빈 리스트
-                                 (호출하는 쪽은 NOT_FOUND를 "구조 데이터 없음"으로 처리할 것 -
-                                 유사도 0과는 다름)
+        """Look up SMILES/InChIKey by actual EP publication number (e.g. 'EP3315022A1').
+        Statuses:
+        - LOCAL_DB_MATCH: found in the local SureChEMBL map.
+        - REMOTE_MATCH: found through the REST API, only when allow_remote=True.
+        - NOT_FOUND: no structure data; smiles_list is empty. Callers must interpret this as missing structure data, not zero similarity.
         """
         clean_id = normalize_patent_number(patent_id)
         if not clean_id:
@@ -219,8 +209,7 @@ class PatCIDSureChEMBLConnector:
         }
 
     def enrich_patent_record(self, patent_record, allow_remote=False):
-        """stream_section_c_records() 레코드를 실제 특허번호(target_patent_id /
-        prior_patent_id) 기준으로 보강 (순차 파일명 id 기준 아님)"""
+        """Enrich stream_section_c_records() by target_patent_id / prior_patent_id, not sequential filename IDs."""
         target_patent_id = patent_record.get('target_patent_id')
         prior_patent_id = patent_record.get('prior_patent_id')
 

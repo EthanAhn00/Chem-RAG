@@ -6,14 +6,9 @@ import csv
 
 
 class EPOStreamParser:
-    """대용량 EPO JSON 특허 데이터셋을 위한 스트림 방식(zero-OOM) 리더
-    골드 라벨이 있는 서브폴더(Simple, Simple_under1021, task3_contrasiv_learning_data)를
-    스캔하고 IPC Section C로 필터링
-
-    각 Simple/<id>.json 레코드는 자유 텍스트 + IPC 코드만 담고 실제 EP 공개번호는
-    없어, 단독으로는 XML 도면 파일/SureChEMBL/PatCID와 특허번호 기준 조인 불가능
-    원본 `260207_Target_data.xlsx`에 그 조인 키(id -> T_id/P_id 특허번호,
-    T_file/P_file XML 파일명)가 있어, 한 번 로드해 모든 레코드에 붙여서 내보냄
+    """Streaming (zero-OOM) reader for large EPO JSON patent datasets.
+    Scans labeled subfolders (Simple, Simple_under1021, task3_contrasiv_learning_data) and filters IPC Section C.
+    Simple/<id>.json records contain free text and IPC codes but no EP publication numbers, so they cannot independently join XML drawings, SureChEMBL, or PatCID by patent number. Load the original 260207_Target_data.xlsx mapping once and attach its join keys (id -> T_id/P_id patent numbers and T_file/P_file XML filenames) to emitted records.
     """
 
     def __init__(self, epo_parsed_base=None, id_patent_map_path=None):
@@ -27,14 +22,14 @@ class EPOStreamParser:
             )
         self.epo_parsed_base = epo_parsed_base
 
-        # Task 1 벤치마크용 골드 라벨 서브폴더. 'Simple'/'Simple_under1021'은 실제
-        # 'Label' 필드 보유 + id_patent_map.csv로 특허번호 조인 가능. 'task3_contrasiv_
-        # learning_data'도 실제 'Label' 필드 보유(하드 네거티브 포함)하나 특허번호 연결은 없음.
+        # Task 1 labeled subfolders. 'Simple'/'Simple_under1021' contain
+        # a 'Label' field and can join patent numbers through id_patent_map.csv.
+        # 'task3_contrasiv_learning_data' has labels and hard negatives, but no patent-number mapping.
         #
-        # 'Simple_label2'/'Simple_label2_under_1021'은 제외: 'Label' 필드 자체가 없고
-        # 대응하는 특허번호 인덱스도 없어 프로버넌스 확인 불가. 결측 라벨을 0으로
-        # 기본값 처리하면 약 4,800건의 라벨 없는 데이터가 "검증된 negative"로 둔갑되므로,
-        # 확인 전까지는 `unverified_subfolders`로 분리해 Task 1 평가셋에서 제외
+        # Exclude 'Simple_label2'/'Simple_label2_under_1021': neither a 'Label' field
+        # nor a corresponding patent-number index is available to verify provenance.
+        # Defaulting missing labels to 0 would misrepresent about 4,800 unlabeled records as verified negatives.
+        # Keep them in unverified_subfolders and outside Task 1 evaluation until verified.
         self.target_subfolders = [
             'Simple',
             'Simple_under1021',
@@ -56,9 +51,9 @@ class EPOStreamParser:
         self.id_patent_map = self._load_id_patent_map(id_patent_map_path)
 
     def _load_id_patent_map(self, path):
-        # 재구축한 CSV 매핑에서 id -> {T_id, P_id, T_file, P_file, T_IPC, P_IPC} 로드
-        # 매핑 파일이 없어도 치명적이지 않음 - 레코드는 특허번호 연결 없이 반환되고
-        # 이후 단계(도면 조회, SureChEMBL/PatCID 보강)에서 "구조/비전 데이터 없음"으로 처리
+        # Load id -> {T_id, P_id, T_file, P_file, T_IPC, P_IPC} from the reconstructed CSV map.
+        # A missing mapping file is not fatal; emit records without patent-number links.
+        # Drawing and SureChEMBL/PatCID steps then treat structure/vision data as missing.
         id_map = {}
         if not path or not os.path.exists(path):
             print(f'[EPOStreamParser] id_patent_map not found at {path} - records will have no patent-number linkage.')
@@ -81,7 +76,7 @@ class EPOStreamParser:
         return id_map
 
     def is_section_c_patent(self, ipc_code_str):
-        # IPC 분류 코드의 Section C(화학·야금) 소속 여부 확인
+        # Check whether an IPC code belongs to Section C (chemistry/metallurgy).
         if not ipc_code_str:
             return False
         tokens = re.split(r'[|\s,;]+', str(ipc_code_str))
@@ -92,7 +87,7 @@ class EPOStreamParser:
         return False
 
     def stream_section_c_records(self, max_samples=20000):
-        # target_subfolders를 스캔해 중복 제거된 고유 Section C 레코드 추출
+        # Scan target_subfolders and emit deduplicated Section C records.
         if not os.path.exists(self.epo_parsed_base):
             print(f'EPO Parsed Base Directory not found: {self.epo_parsed_base}')
             return []
@@ -122,13 +117,13 @@ class EPOStreamParser:
                     target_claim = data.get('Target', '').strip()
                     prior_claim = data.get('Prior', '').strip()
 
-                    # 청구항 텍스트 앞부분 기준 중복 제거 키
+                    # Deduplicate using the beginning of the claim text.
                     dedup_key = hash(target_claim[:100] + prior_claim[:100])
                     if dedup_key in seen_keys:
                         continue
 
-                    # IPC 필드명은 서브폴더마다 다름: 'Simple'류는 'Target_IPC'/'Prior_IPC',
-                    # 'task3_contrasiv_learning_data'는 'T_IPC'만 사용(Prior_IPC/P_IPC 없음)
+                    # IPC field names vary: Simple variants use 'Target_IPC'/'Prior_IPC';
+                    # task3_contrasiv_learning_data uses only 'T_IPC' (no Prior_IPC/P_IPC).
                     target_ipc = data.get('Target_IPC') or data.get('T_IPC') or ''
                     prior_ipc = data.get('Prior_IPC') or data.get('P_IPC') or ''
 
@@ -138,8 +133,8 @@ class EPOStreamParser:
                     if is_target_c or is_prior_c:
                         seen_keys.add(dedup_key)
 
-                        # 레코드 id로 실제 EP 특허번호/XML 파일명 복원
-                        # 예: "10001.json" -> id 10001 -> {T_id: EP3649854A1, P_id: EP3315022A1, ...}
+                        # Recover actual EP publication numbers/XML filenames from the record ID.
+                        # Example: '10001.json' -> id 10001 -> {T_id: EP3649854A1, P_id: EP3315022A1, ...}.
                         record_id = None
                         stem = os.path.splitext(f)[0]
                         if stem.isdigit():
@@ -155,7 +150,7 @@ class EPOStreamParser:
                             'target_claim': target_claim,
                             'prior_claim': prior_claim,
                             'ground_truth_label': int(data.get('Label', 0)),
-                            'label_verified': 'Label' in data,  # False면 라벨 기본값 처리됨 - target_subfolders에서는 발생 안 해야 함
+                            'label_verified': 'Label' in data,  # False indicates a defaulted label; this should not occur in target_subfolders.
                             'target_ipc': target_ipc,
                             'prior_ipc': prior_ipc,
                             'is_target_c': is_target_c,

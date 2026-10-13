@@ -1,15 +1,15 @@
-"""임베딩 인코더 공통 인터페이스."""
+"""Shared embedding-encoder interfaces."""
 import abc
 import hashlib
 
 
 def text_hash(text):
-    """임베딩 입력 텍스트의 SHA-256(앞 16자리). 재색인 필요 여부 판단용."""
+    """First 16 hexadecimal characters of the embedding input's SHA-256; used to detect reindexing needs."""
     return hashlib.sha256((text or '').encode('utf-8')).hexdigest()[:16]
 
 
 class DenseEncoder(abc.ABC):
-    """고정 차원 dense 벡터 인코더."""
+    """Fixed-dimensional dense vector encoder."""
 
     name = 'abstract'
     model_id = 'abstract'
@@ -21,7 +21,7 @@ class DenseEncoder(abc.ABC):
 
     @abc.abstractmethod
     def encode(self, texts):
-        """list[str] -> list[list[float]] (L2 정규화된 벡터)."""
+        """list[str] -> list[list[float]], with L2-normalized vectors."""
 
     def encode_one(self, text):
         return self.encode([text])[0]
@@ -30,18 +30,14 @@ class DenseEncoder(abc.ABC):
         return {'backend': self.name, 'model': self.model_id, 'dim': self.dim}
 
     def signature(self):
-        """적재 시 인코더와 검색 시 인코더가 같은지 확인하기 위한 지문.
-
-        백엔드/모델/차원 + 백엔드별 추가 상태(예: 벡터 파일 해시)를 합쳐 만든다.
-        payload의 embedding_signature와 비교하면 다른 인코더로 검색하는 사고를 막을 수 있다.
-        """
+        """Fingerprint for verifying that indexing and search use the same encoder. Combines backend/model/dimension with backend-specific state, such as vector-file hashes. Compare with payload embedding_signature to prevent searching with an incompatible encoder."""
         cached = getattr(self, '_signature_cache', None)
         if cached:
             return cached
         import hashlib as _h
         parts = [self.name, str(self.model_id), str(self.dim)] + list(self.signature_parts())
         sig = _h.sha256('|'.join(parts).encode('utf-8')).hexdigest()[:16]
-        self._signature_cache = sig       # 파일 해시 등 비싼 계산은 한 번만
+        self._signature_cache = sig       # Cache expensive calculations such as file hashes.
         return sig
 
     def signature_parts(self):
@@ -49,7 +45,7 @@ class DenseEncoder(abc.ABC):
 
 
 class SparseEncoder(abc.ABC):
-    """sparse(어휘) 벡터 인코더."""
+    """Sparse lexical vector encoder."""
 
     name = 'abstract'
 

@@ -1,1 +1,1 @@
-# OCSR(광학 화학구조 인식) 관련 스크립트
+# Optical Chemical Structure Recognition (OCSR) scripts.

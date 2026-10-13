@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Query별 정규화 점수로 T1과 T2를 가중 결합해 평가한다.
-
-alpha는 시간 분할의 development query에서만 선택하고,
-test query에서는 선택된 값을 고정한다. 각 query의 공통 후보
-전체를 기준으로 T1과 T2 점수를 각각 z-score 정규화한다.
-"""
+"""Evaluate weighted T1/T2 fusion using query-normalized scores. Select alpha only on time-split development queries and freeze it on test. Z-score each modality over the complete common candidate pool per query."""
 
 from __future__ import annotations
 
@@ -56,17 +51,17 @@ MINIMUM_INFERENCE_QUERIES = 30
 
 
 def parse_alpha_grid(value: str) -> list[float]:
-    """쉼표로 구분한 alpha 격자를 검증하고 정렬한다."""
+    """Validate and sort a comma-separated alpha grid."""
     try:
         alphas = sorted({float(item.strip()) for item in value.split(",")})
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("alpha 격자는 숫자여야 합니다") from exc
+        raise argparse.ArgumentTypeError("Alpha grid must be numeric") from exc
     if not alphas or any(not math.isfinite(alpha) for alpha in alphas):
-        raise argparse.ArgumentTypeError("alpha 격자가 비어 있거나 유한수가 아닙니다")
+        raise argparse.ArgumentTypeError("Alpha grid is empty or contains nonfinite values")
     if alphas[0] < 0.0 or alphas[-1] > 1.0:
-        raise argparse.ArgumentTypeError("alpha는 0 이상 1 이하여야 합니다")
+        raise argparse.ArgumentTypeError("Alpha must be between 0 and 1")
     if 0.0 not in alphas or 1.0 not in alphas:
-        raise argparse.ArgumentTypeError("alpha 격자에는 0.0과 1.0이 모두 필요합니다")
+        raise argparse.ArgumentTypeError("Alpha grid must include both 0.0 and 1.0")
     return alphas
 
 
@@ -75,7 +70,7 @@ def load_query_splits(
     development_label: str,
     test_label: str,
 ) -> tuple[dict[str, str], dict[str, int]]:
-    """query 역할 특허의 development/test 라벨을 읽는다."""
+    """Read development/test labels for patents with the query role."""
     output: dict[str, str] = {}
     observed_labels: dict[str, int] = defaultdict(int)
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -83,23 +78,23 @@ def load_query_splits(
         required = {"id", "role", "split"}
         missing = required - set(reader.fieldnames or [])
         if missing:
-            raise SystemExit(f"split 파일 필수 열이 없습니다: {path}:{sorted(missing)}")
+            raise SystemExit(f"Split file lacks required columns: {path}:{sorted(missing)}")
         for row_number, row in enumerate(reader, start=2):
             if str(row.get("role") or "").strip() != "query":
                 continue
             query_id = normalize_exact_ep(row.get("id"))
             label = str(row.get("split") or "").strip()
             if query_id is None or not label:
-                raise SystemExit(f"split query 행이 잘못됐습니다: {path}:{row_number}")
+                raise SystemExit(f"Invalid split-query row: {path}:{row_number}")
             if query_id in output and output[query_id] != label:
-                raise SystemExit(f"query split이 서로 다릅니다: {query_id}")
+                raise SystemExit(f"Conflicting query splits: {query_id}")
             output[query_id] = label
             observed_labels[label] += 1
     if development_label == test_label:
-        raise SystemExit("development와 test 라벨은 서로 달라야 합니다")
+        raise SystemExit("Development and test labels must differ")
     for label in (development_label, test_label):
         if label not in observed_labels:
-            raise SystemExit(f"split 파일에 지정한 라벨이 없습니다: {label}")
+            raise SystemExit(f"Requested labels absent from split file: {label}")
     return output, dict(sorted(observed_labels.items()))
 
 
@@ -107,7 +102,7 @@ def load_score_rankings(
     path: Path,
     model_column: str,
 ) -> tuple[dict[str, dict[str, list[tuple[str, float]]]], set[str]]:
-    """전체 후보 순위와 원 점수를 함께 읽는다."""
+    """Read complete candidate rankings and original scores together."""
     output: dict[str, dict[str, list[tuple[str, float]]]] = defaultdict(dict)
     models: set[str] = set()
     with path.open("r", encoding="utf-8") as handle:
@@ -119,14 +114,14 @@ def load_score_rankings(
             query_id = normalize_exact_ep(row.get("query_patent_id"))
             ranking = row.get("ranking")
             if not model or query_id is None or not isinstance(ranking, list):
-                raise SystemExit(f"ranking 행이 잘못됐습니다: {path}:{row_number}")
+                raise SystemExit(f"Invalid ranking row: {path}:{row_number}")
             if query_id in output[model]:
-                raise SystemExit(f"모델·query ranking이 중복됩니다: {path}:{row_number}")
+                raise SystemExit(f"Duplicate model/query ranking: {path}:{row_number}")
             parsed: list[tuple[str, float]] = []
             for expected_rank, item in enumerate(ranking, start=1):
                 if not isinstance(item, dict) or item.get("rank") != expected_rank:
                     raise SystemExit(
-                        f"ranking 순위가 연속적이지 않습니다: "
+                        f"Ranking ranks are not contiguous: "
                         f"{path}:{row_number}:{expected_rank}"
                     )
                 patent_id = normalize_exact_ep(item.get("patent_id"))
@@ -134,18 +129,18 @@ def load_score_rankings(
                     score = float(item.get("score"))
                 except (TypeError, ValueError) as exc:
                     raise SystemExit(
-                        f"ranking 점수가 잘못됐습니다: {path}:{row_number}"
+                        f"Invalid ranking score: {path}:{row_number}"
                     ) from exc
                 if patent_id is None or patent_id == query_id or not math.isfinite(score):
-                    raise SystemExit(f"ranking 항목이 잘못됐습니다: {path}:{row_number}")
+                    raise SystemExit(f"Invalid ranking entry: {path}:{row_number}")
                 parsed.append((patent_id, score))
             patent_ids = [patent_id for patent_id, _ in parsed]
             if len(patent_ids) != len(set(patent_ids)):
-                raise SystemExit(f"ranking에 중복 후보가 있습니다: {path}:{row_number}")
+                raise SystemExit(f"Ranking contains duplicate candidates: {path}:{row_number}")
             output[model][query_id] = parsed
             models.add(model)
     if not models:
-        raise SystemExit(f"ranking이 없습니다: {path}")
+        raise SystemExit(f"Ranking missing: {path}")
     return output, models
 
 
@@ -155,7 +150,7 @@ def require_full_score_rankings(
     models: set[str],
     label: str,
 ) -> None:
-    """평가 query마다 전체 후보 점수가 저장됐는지 확인한다."""
+    """Verify full candidate-score coverage for every evaluation query."""
     for model in sorted(models):
         expected_queries = set().union(
             *(set(per_query[model].get(task, {})) for task in TASKS)
@@ -164,7 +159,7 @@ def require_full_score_rankings(
         missing_queries = expected_queries - available_queries
         if missing_queries:
             raise SystemExit(
-                f"{label} 평가 query의 ranking이 누락됐습니다: "
+                f"{label} evaluation queries lack rankings: "
                 f"{model}:count={len(missing_queries)}, "
                 f"examples={sorted(missing_queries)[:5]}"
             )
@@ -177,26 +172,26 @@ def require_full_score_rankings(
             expected_counts = {row["candidate_count_ranked"] for row in task_rows}
             written_counts = {row["ranking_rows_written"] for row in task_rows}
             if len(expected_counts) != 1 or len(written_counts) != 1:
-                raise SystemExit(f"{label} 후보 수가 task별로 다릅니다: {model}:{query_id}")
+                raise SystemExit(f"{label} candidate counts differ across tasks: {model}:{query_id}")
             expected_count = next(iter(expected_counts))
             written_count = next(iter(written_counts))
             actual_count = len(rankings[model][query_id])
             if written_count != expected_count or actual_count != expected_count:
                 raise SystemExit(
-                    f"{label} ranking이 전체 후보 점수를 포함하지 않습니다: "
+                    f"{label} ranking lacks complete candidate scores: "
                     f"{model}:{query_id}:expected={expected_count}, "
                     f"declared={written_count}, actual={actual_count}"
                 )
 
 
 def zscore(values: np.ndarray, label: str) -> np.ndarray:
-    """모집단 표준편차를 사용해 query 내부 점수를 표준화한다."""
+    """Standardize scores within each query using population standard deviation."""
     mean = float(values.mean())
     standard_deviation = float(values.std(ddof=0))
     if not math.isfinite(mean) or not math.isfinite(standard_deviation):
-        raise ValueError(f"{label} 점수 평균 또는 표준편차가 유한수가 아닙니다")
+        raise ValueError(f"{label} score mean or standard deviation is nonfinite")
     if standard_deviation <= 1e-15:
-        raise ValueError(f"{label} 점수 표준편차가 0입니다")
+        raise ValueError(f"{label} score standard deviation is 0")
     return (values - mean) / standard_deviation
 
 
@@ -204,11 +199,11 @@ def prepare_query_scores(
     text_ranking: list[tuple[str, float]],
     structure_ranking: list[tuple[str, float]],
 ) -> tuple[list[str], np.ndarray, np.ndarray, list[str]]:
-    """T1 순서에 맞춰 두 점수를 정렬하고 각각 z-score로 바꾼다."""
+    """Align both score arrays with T1 order and z-score them separately."""
     text_ids = [patent_id for patent_id, _ in text_ranking]
     structure_ids = [patent_id for patent_id, _ in structure_ranking]
     if set(text_ids) != set(structure_ids):
-        raise ValueError("T1과 T2 ranking의 후보 집합이 다릅니다")
+        raise ValueError("T1/T2 ranking candidate sets differ")
     structure_score = dict(structure_ranking)
     text_values = np.asarray([score for _, score in text_ranking], dtype=np.float64)
     structure_values = np.asarray(
@@ -230,7 +225,7 @@ def fuse_weighted_scores(
     structure_order: list[str],
     alpha: float,
 ) -> list[tuple[str, float]]:
-    """정규화 점수를 가중합하고 내림차순으로 정렬한다."""
+    """Weighted sum of normalized scores, sorted descending."""
     fused_scores = alpha * text_z + (1.0 - alpha) * structure_z
     if math.isclose(alpha, 1.0, abs_tol=1e-15):
         order = np.arange(len(patent_ids))
@@ -254,9 +249,9 @@ def best_gold_rank(ranking: list[tuple[str, float]], gold: set[str]) -> int | No
 
 
 def select_alpha(rows: list[dict[str, Any]]) -> tuple[float, float]:
-    """개발 Citation MRR@100 최대 alpha를 사전 규칙으로 고른다."""
+    """Choose alpha maximizing development Citation MRR@100 by predefined rules."""
     if not rows:
-        raise SystemExit("alpha 선택에 사용할 development 결과가 없습니다")
+        raise SystemExit("No development results for alpha selection")
     best_value = max(float(row[PRIMARY_SELECTION_METRIC]) for row in rows)
     tied = [
         float(row["alpha"])
@@ -268,13 +263,13 @@ def select_alpha(rows: list[dict[str, Any]]) -> tuple[float, float]:
             abs_tol=1e-12,
         )
     ]
-    # 정확히 동률이면 0.5에 가까운 값을 우선하고, 다시 동률이면 강한 T1 비중을 택한다.
+    # Exact ties prefer values nearest 0.5, then larger alpha (more T1 weight).
     selected = min(tied, key=lambda alpha: (abs(alpha - 0.5), -alpha))
     return selected, best_value
 
 
 def adjust_holm_for_allowed_rows(rows: list[dict[str, Any]]) -> None:
-    """추론 허용 행에만 task·metric별 Holm 보정을 적용한다."""
+    """Apply task/metric Holm correction only to rows eligible for inference."""
     for task in TASKS:
         for metric in METRICS:
             family = [
@@ -313,7 +308,7 @@ def run_self_test() -> None:
     assert math.isclose(float(text_z.std(ddof=0)), 1.0, abs_tol=1e-12)
     parsed = parse_alpha_grid("0,0.5,1")
     assert parsed == [0.0, 0.5, 1.0]
-    print("자체 검증을 통과했습니다.")
+    print("Self-check passed.")
 
 
 def main() -> int:
@@ -357,18 +352,18 @@ def main() -> int:
     }
     missing_arguments = [name for name, value in required.items() if value is None]
     if missing_arguments:
-        parser.error(f"필수 인자가 없습니다: {', '.join(missing_arguments)}")
+        parser.error(f"Missing required arguments: {', '.join(missing_arguments)}")
     missing_files = [
         str(path)
         for name, path in required.items()
         if name != "--output-dir" and not path.is_file()
     ]
     if missing_files:
-        raise SystemExit(f"입력 파일이 없습니다: {missing_files}")
+        raise SystemExit(f"Input file missing: {missing_files}")
     if args.ranking_output_limit < 100:
-        parser.error("--ranking-output-limit은 100 이상이어야 합니다")
+        parser.error("--ranking-output-limit must be at least 100")
     if args.iterations < 1000:
-        parser.error("--iterations는 1000 이상이어야 합니다")
+        parser.error("--iterations must be at least 1000")
 
     started_at = time.perf_counter()
     ground_truth = load_ground_truth(args.ground_truth, args.conflict_field)
@@ -384,7 +379,7 @@ def main() -> int:
     )
     if len(structure_models) != 1:
         raise SystemExit(
-            f"Weighted fusion 1차 실험은 T2 모델 하나만 허용합니다: {sorted(structure_models)}"
+            f"Initial weighted-fusion experiment allows only one T2 model: {sorted(structure_models)}"
         )
     structure_model = next(iter(structure_models))
     text_rankings, text_ranking_models = load_score_rankings(args.text_rankings, "source")
@@ -393,9 +388,9 @@ def main() -> int:
         "method",
     )
     if text_models != text_ranking_models:
-        raise SystemExit("T1 query 결과와 ranking의 source 집합이 다릅니다")
+        raise SystemExit("T1 query-result and ranking source sets differ")
     if structure_models != structure_ranking_models:
-        raise SystemExit("T2 query 결과와 ranking의 method 집합이 다릅니다")
+        raise SystemExit("T2 query-result and ranking method sets differ")
     require_full_score_rankings(text_per_query, text_rankings, text_models, "T1")
     require_full_score_rankings(
         structure_per_query,
@@ -418,7 +413,7 @@ def main() -> int:
             structure_queries = set(structure_per_query[structure_model].get(task, {}))
             if text_queries != structure_queries:
                 raise SystemExit(
-                    f"T1과 T2의 평가 query 집합이 다릅니다: "
+                    f"T1/T2 evaluation query sets differ: "
                     f"source={text_model}, task={task}"
                 )
             assigned: set[str] = set()
@@ -503,13 +498,13 @@ def main() -> int:
                 for query_id in queries:
                     gold = ground_truth[query_id][task]
                     if not gold:
-                        raise SystemExit(f"평가 query의 gold가 비어 있습니다: {task}:{query_id}")
+                        raise SystemExit(f"Evaluation query has empty gold: {task}:{query_id}")
                     text_meta = text_per_query[text_model][task][query_id]
                     structure_meta = structure_per_query[structure_model][task][query_id]
                     if text_meta["gold_count"] != len(gold) or structure_meta["gold_count"] != len(gold):
-                        raise SystemExit(f"gold 수가 입력과 다릅니다: {task}:{query_id}")
+                        raise SystemExit(f"Gold count differs from input: {task}:{query_id}")
                     if text_meta["candidate_count_ranked"] != structure_meta["candidate_count_ranked"]:
-                        raise SystemExit(f"T1과 T2의 후보 수가 다릅니다: {task}:{query_id}")
+                        raise SystemExit(f"T1/T2 candidate counts differ: {task}:{query_id}")
                     try:
                         ids, text_z, structure_z, structure_order = prepare_query_scores(
                             text_rankings[text_model][query_id],
@@ -731,7 +726,7 @@ def main() -> int:
         "method": "query_normalized_weighted_score_fusion",
         "score_definition": "alpha * z(T1 score) + (1 - alpha) * z(T2 score)",
         "normalization": {
-            "scope": "각 query의 공통 전체 후보",
+            "scope": "All common candidates within each query",
             "method": "population z-score",
             "standard_deviation_ddof": 0,
         },
@@ -742,7 +737,7 @@ def main() -> int:
             "task": PRIMARY_TASK,
             "metric": PRIMARY_SELECTION_METRIC,
             "per_text_source": True,
-            "tie_policy": "1e-12 이내 동률이면 0.5에 가까운 값, 다시 동률이면 큰 alpha",
+            "tie_policy": "Ties within 1e-12 prefer alpha nearest 0.5, then larger alpha",
             "selected_alphas": selected_alphas,
             "test_labels_not_used_for_selection": True,
         },
@@ -754,19 +749,19 @@ def main() -> int:
             "excluded_query_counts": excluded_query_counts,
         },
         "candidate_policy": (
-            "T1과 T2에서 query 자신을 제외한 동일 전체 후보 점수만 결합; "
-            "후보 집합이 다르거나 상위 일부만 있으면 중단"
+            "Fuse identical complete T1/T2 candidate scores after self-exclusion; "
+            "stop on mismatched or truncated candidate sets"
         ),
         "endpoint_reproduction_policy": (
-            "alpha 1.0은 T1 입력 순서, alpha 0.0은 T2 입력 순서를 그대로 사용"
+            "Alpha 1.0 retains T1 order; alpha 0.0 retains T2 order"
         ),
-        "tie_break_policy": "0과 1 사이 alpha의 결합 점수가 같으면 EP 특허번호 오름차순",
+        "tie_break_policy": "For intermediate alpha, equal fused scores break by ascending EP identifier",
         "primary_task": PRIMARY_TASK,
         "secondary_task": "Conflict-X",
         "minimum_inference_queries": MINIMUM_INFERENCE_QUERIES,
         "small_sample_policy": (
-            "test query가 30개 미만이면 평균과 win/tie/loss만 기록하고 "
-            "bootstrap CI와 p-value를 산출하지 않음"
+            "With fewer than 30 test queries, report only means and win/tie/loss, "
+            "without bootstrap CI or p-values"
         ),
         "text_sources": sorted(text_models),
         "structure_method": structure_model,
@@ -774,20 +769,20 @@ def main() -> int:
         "paired_inference": {
             "evaluation_split": "test only",
             "unit": "query",
-            "comparison": "선택된 weighted fusion과 해당 T1 원본",
+            "comparison": "Selected weighted fusion versus its corresponding original T1",
             "bootstrap_iterations": args.iterations,
             "sign_flip_iterations": args.iterations,
             "seed": args.seed,
             "confidence_interval": "percentile paired bootstrap 95% CI",
-            "multiple_comparison_policy": "task·metric별 T1 source 비교에 Holm 보정",
+            "multiple_comparison_policy": "Holm correction over T1-source comparisons per task/metric",
         },
         "ground_truth_field_mapping": {
             "Citation": "all_cited_patents",
             "Conflict-X": args.conflict_field,
         },
         "interpretation_limit": (
-            "현재 oracle-derived closed candidate pool의 탐색 결과이며 "
-            "open-corpus 일반화 성능으로 해석하지 않음"
+            "Exploratory results on the current oracle-derived closed candidate pool; "
+            "not open-corpus generalization performance"
         ),
         "provenance": {
             "script_path": str(Path(__file__).resolve()),

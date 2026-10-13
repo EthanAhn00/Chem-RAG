@@ -47,7 +47,7 @@ Total
 
 """
 # ============================================================
-# 기본 설정
+# Default settings.
 # ============================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -57,7 +57,7 @@ DATA_DIR = PROJECT_ROOT / "data" / "epo_txt"
 QDRANT_PATH = PROJECT_ROOT / "data" / "qdrant_text_units"
 
 # ============================================================
-# Embedding Model 설정
+# Embedding model settings.
 # ============================================================
 
 MODEL_CONFIGS = {
@@ -90,14 +90,14 @@ MODEL_CONFIGS = {
     },
 }
 
-# 현재 데이터 분석 결과:
+# Current dataset-analysis results:
 # document max      = 1,369
 # claim max         = 17,260
 # whole_claims max  = 29,990
 
 
 # ============================================================
-# 명령행 인자
+# Command-line arguments.
 # ============================================================
 
 def parse_args():
@@ -205,9 +205,9 @@ def load_embedding_model(config, device):
     # ========================================================
     # NV-Embed-v2
     #
-    # sentence-transformers 2.7.0에서는
-    # SentenceTransformer(model_kwargs=...)를 지원하지 않으므로
-    # Transformer module을 직접 생성하여 FP16 로드
+    # sentence-transformers 2.7.0 does not support
+    # SentenceTransformer(model_kwargs=...); instantiate the
+    # Transformer module directly for FP16 loading.
     # ========================================================
 
     if config["model_name"] == "nvidia/NV-Embed-v2":
@@ -229,7 +229,7 @@ def load_embedding_model(config, device):
             },
         )
 
-        # NV-Embed-v2 공식 Pooling 설정
+        # Official NV-Embed-v2 pooling configuration.
         pooling = Pooling(
             transformer.get_word_embedding_dimension(),
 
@@ -269,7 +269,7 @@ def load_embedding_model(config, device):
 
 
     # ========================================================
-    # 공통 설정
+    # Shared settings.
     # ========================================================
 
     model.max_seq_length = (
@@ -467,7 +467,7 @@ def iter_text_units(files):
 
 
         # ====================================================
-        # Claim text 정리
+        # Normalize claim text.
         # ====================================================
 
         valid_claims = []
@@ -597,7 +597,7 @@ def process_batch(
         for item in batch
     ]
 
-    # NV-Embed-v2 passage는 EOS 추가
+    # Append EOS to NV-Embed-v2 passages.
     if config["add_eos"]:
 
         eos_token = model.tokenizer.eos_token
@@ -613,7 +613,7 @@ def process_batch(
 
 
     # document / passage embedding
-    # query instruction은 검색 시 query에만 적용
+    # Apply the query instruction only to queries during search.
     embeddings = model.encode(
         texts_to_encode,
         batch_size=embedding_batch_size,
@@ -974,7 +974,7 @@ def main():
             batch = []
 
 
-    # 마지막 batch
+    # Final batch.
     if batch:
 
         process_batch(

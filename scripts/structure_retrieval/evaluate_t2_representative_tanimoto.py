@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""다양성 대표 구조의 최대 Tanimoto로 T2 structure-only 검색을 평가한다.
-
-특허별 구조 수 차이를 제한하기 위해 Morgan fingerprint 공간에서 결정적
-farthest-first 방식으로 최대 K개의 다양성 대표를 선택한다. 틴 특허와 후보 특허
-대표 분자쌍의 RDKit exact Tanimoto 최댓값을 특허 점수로 사용한다. 전체
-구조쌍 최댓값이 아니므로 대표 제한 K를 반드시 함께 보고한다.
-"""
+"""Evaluate T2 using maximum Tanimoto over diverse representative structures. Deterministic farthest-first selection in Morgan fingerprint space caps representatives per patent at K to limit count differences. Score query/candidate patents by maximum RDKit exact Tanimoto between representatives, not all molecule pairs; always report the K limit."""
 
 from __future__ import annotations
 
@@ -63,10 +57,10 @@ def build_fingerprints(
     for number, smiles in enumerate(unique_smiles, start=1):
         molecule = Chem.MolFromSmiles(smiles)
         if molecule is None:
-            raise SystemExit(f"이미 검증된 canonical SMILES 파싱에 실패했습니다: {smiles}")
+            raise SystemExit(f"Failed to parse a previously validated canonical SMILES: {smiles}")
         fingerprints[smiles] = generator.GetFingerprint(molecule)
         if number % 10000 == 0:
-            print(f"  Morgan fingerprint {number}/{len(unique_smiles)}개 처리", flush=True)
+            print(f"  Morgan fingerprint {number}/{len(unique_smiles)} processed", flush=True)
     return fingerprints, rdBase.rdkitVersion
 
 
@@ -121,7 +115,7 @@ def build_representatives(
         representatives[patent_id] = [fingerprints[smiles] for smiles in selected]
         counts[patent_id] = len(selected)
         if number % 250 == 0:
-            print(f"  대표 구조 {number}/{len(candidate_ids)}개 특허 처리", flush=True)
+            print(f"  Representative structures: {number}/{len(candidate_ids)} patents processed", flush=True)
     return representatives, counts
 
 
@@ -166,7 +160,7 @@ def make_rankings(
             for index in order
         ]
         if number % 50 == 0:
-            print(f"  Tanimoto ranking {number}/{len(query_ids)} query 처리", flush=True)
+            print(f"  Tanimoto ranking {number}/{len(query_ids)} queries processed", flush=True)
     return rankings
 
 
@@ -222,7 +216,7 @@ def run_self_test() -> None:
         "EP3A1",
     ]
     assert all(patent_id != "EP1A1" for patent_id, _ in rankings["EP1A1"])
-    print("자체 검증을 통과했습니다.")
+    print("Self-check passed.")
 
 
 def main() -> int:
@@ -248,14 +242,14 @@ def main() -> int:
         return 0
     required = [args.ground_truth, args.candidate_patents, args.structures, args.output_dir]
     if any(path is None for path in required):
-        parser.error("ground truth, 후보, 구조, 출력 인자가 필요합니다")
+        parser.error("Require ground truth, candidates, structures, and output arguments")
     for path in (args.ground_truth, args.candidate_patents, args.structures):
         if not path.is_file():
-            raise SystemExit(f"입력 파일이 없습니다: {path}")
+            raise SystemExit(f"Input file missing: {path}")
     if args.max_representatives < 1:
-        parser.error("--max-representatives는 1 이상이어야 합니다")
+        parser.error("--max-representatives must be at least 1")
     if args.ranking_limit < 100:
-        parser.error("--ranking-limit은 100 이상이어야 합니다")
+        parser.error("--ranking-limit must be at least 100")
 
     started_at = time.perf_counter()
     candidate_ids = load_candidates(args.candidate_patents, args.candidate_id_column)
@@ -371,23 +365,23 @@ def main() -> int:
             "Representative max Tanimoto "
             f"(farthest-first K={args.max_representatives} approximation)"
         ),
-        "score_definition": "query/candidate 다양성 대표 분자쌍의 RDKit exact Tanimoto 최댓값",
+        "score_definition": "Maximum RDKit exact Tanimoto over query/candidate representative molecule pairs",
         "exact_full_structure_set_max_tanimoto": False,
         "approximation_scope": (
-            "특허당 farthest-first 대표 구조를 최대 K개만 사용한 근사치이며, "
-            "전체 구조 집합의 분자쌍 최대 Tanimoto로 일반화하지 않음"
+            "Approximation using at most K farthest-first representatives per patent; "
+            "not the maximum Tanimoto over the complete structure sets"
         ),
         "representative_selection": (
-            "Morgan fingerprint 비트 수의 중앙값에 가까운 구조에서 시작하는 "
-            "결정적 farthest-first diversity selection"
+            "Start near the median Morgan on-bit count and apply "
+            "deterministic farthest-first diversity selection"
         ),
         "max_representatives_per_patent": args.max_representatives,
         "candidate_pool_policy": (
-            "GT 등장 특허로 제한된 원 공통 후보 중 구조 보유 특허만 랭킹하고 "
-            "자기 특허 제외"
+            "Rank only structure-bearing patents in the original GT-derived common candidates, "
+            "excluding self"
         ),
-        "candidate_pool_scope": "oracle-derived closed pool; open-corpus 성능이 아님",
-        "evaluation_subset_policy": "query와 해당 task의 모든 gold가 구조를 보유한 query",
+        "candidate_pool_scope": "oracle-derived closed pool; not open-corpus performance",
+        "evaluation_subset_policy": "Queries whose own patent and every task-specific gold patent have structures",
         "source_candidate_count": len(candidate_ids),
         "candidate_count": len(usable_patents),
         "ranked_candidates_per_query": len(usable_patents) - 1,

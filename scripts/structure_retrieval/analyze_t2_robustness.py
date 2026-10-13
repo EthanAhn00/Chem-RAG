@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""B1/B2 공통 부분집합의 불확실성, 무작위 기준선과 구조 수 편향을 분석한다.
-
-각 평가 스크립트가 생성한 query 단위 결과를 같은 query·task로 정렬한 뒤 모델 간
-paired bootstrap과 paired sign-flip 검정을 수행한다. 같은 후보 수와 gold 수를 사용해
-무작위 순위 기준선을 반복 생성하며, 선택적으로 Top-k ranking과 구조 파일을 받아
-특허별 구조 수가 노출 빈도와 성능에 미치는 관계를 진단한다.
-"""
+"""Analyze uncertainty, random baselines, and structure-count bias on the common B1/B2 subset. Align per-query results by query/task for paired bootstrap and sign-flip comparisons. Simulate random rankings with actual candidate/gold counts. Optionally use Top-k rankings and structure files to diagnose associations between structure counts, exposure, and performance."""
 
 from __future__ import annotations
 
@@ -90,14 +84,14 @@ def model_name(row: dict[str, Any], path: Path) -> str:
 
 def model_display_name(name: str) -> str:
     fixed = {
-        "mean_morgan_cosine": "Morgan fingerprint 특허 평균 cosine",
+        "mean_morgan_cosine": "Patent-mean Morgan fingerprint cosine",
         "mean_morgan_cosine_original": (
-            "Morgan fingerprint 특허 평균 cosine (원본 canonical SMILES)"
+            "Patent-mean Morgan fingerprint cosine (original canonical SMILES)"
         ),
         "mean_morgan_cosine_common_input": (
-            "Morgan fingerprint 특허 평균 cosine (MoLFormer 공통 model_smiles)"
+            "Patent-mean Morgan fingerprint cosine (common MoLFormer model_smiles)"
         ),
-        "molformer_mean_pooling": "MoLFormer 분자 embedding 특허 평균 cosine",
+        "molformer_mean_pooling": "Patent-mean MoLFormer molecule-embedding cosine",
         "qwen_whole_claims": "Qwen whole-claims text baseline",
         "nv_document": "NV-Embed document text baseline",
     }
@@ -117,10 +111,10 @@ def parse_labeled_path(value: str) -> tuple[str, Path]:
     label = label.strip()
     path_value = path_value.strip()
     if not separator or not label or not path_value:
-        raise argparse.ArgumentTypeError("LABEL=PATH 형식으로 지정해야 합니다")
+        raise argparse.ArgumentTypeError("Use LABEL=PATH format")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", label):
         raise argparse.ArgumentTypeError(
-            "LABEL은 영문자·숫자·점·밑줄·하이픈만 사용할 수 있습니다"
+            "LABEL may contain only ASCII letters, digits, dots, underscores, and hyphens"
         )
     return label, Path(path_value)
 
@@ -144,16 +138,16 @@ def load_per_query(
             }
             missing = required - set(reader.fieldnames or [])
             if missing:
-                raise SystemExit(f"query 결과 파일의 필수 열이 없습니다: {path}:{sorted(missing)}")
+                raise SystemExit(f"Missing required columns in query results: {path}:{sorted(missing)}")
             for row_number, row in enumerate(reader, start=2):
                 query_id = normalize_patent_id(row.get("query_patent_id"))
                 task = str(row.get("task") or "").strip()
                 if query_id is None or task not in {"Citation", "Conflict-X"}:
-                    raise SystemExit(f"query 결과 행이 잘못됐습니다: {path}:{row_number}")
+                    raise SystemExit(f"Invalid query-result row: {path}:{row_number}")
                 name = label_override or model_name(row, path)
                 if query_id in data[name][task]:
                     raise SystemExit(
-                        f"모델·task·query가 중복됩니다: {path}:{row_number}:{name}:{task}:{query_id}"
+                        f"Duplicate model/task/query: {path}:{row_number}:{name}:{task}:{query_id}"
                     )
                 values = {
                     "gold_count": float(row["gold_count"]),
@@ -173,12 +167,12 @@ def load_per_query(
                 )
                 if metadata[name]["input_label_override"] != label_override:
                     raise SystemExit(
-                        f"하나의 모델 이름에 서로 다른 입력 별칭 정책이 섞였습니다: {name}"
+                        f"Conflicting input-alias policies for one model name: {name}"
                     )
                 metadata[name]["paths"].add(str(path))
                 metadata[name]["tasks"].add(task)
     if len(data) < 2:
-        raise SystemExit("paired 비교에는 서로 다른 모델 결과가 두 개 이상 필요합니다")
+        raise SystemExit("Paired comparison requires results from at least two distinct models")
     serializable_metadata = {
         name: {
             "paths": sorted(values["paths"]),
@@ -202,7 +196,7 @@ def require_matched_queries(
         for name in model_names[1:]:
             if query_sets[name] != reference:
                 raise SystemExit(
-                    "paired 비교 모델의 query 집합이 다릅니다: "
+                    "Paired models have different query sets: "
                     f"task={task}, {reference_name}={len(reference)}, "
                     f"{name}={len(query_sets[name])}, "
                     f"only_reference={len(reference - query_sets[name])}, "
@@ -218,7 +212,7 @@ def require_matched_queries(
             }
             if len(gold_counts) != 1 or len(candidate_counts) != 1:
                 raise SystemExit(
-                    "paired 비교의 gold 또는 후보 수가 다릅니다: "
+                    "Gold or candidate counts differ in paired comparisons: "
                     f"task={task}, query={query_id}"
                 )
         matched[task] = sorted(reference)
@@ -403,12 +397,12 @@ def load_structure_counts(path: Path) -> dict[str, int]:
         required = {"patent_id", "canonical_smiles"}
         missing = required - set(reader.fieldnames or [])
         if missing:
-            raise SystemExit(f"구조 파일의 필수 열이 없습니다: {path}:{sorted(missing)}")
+            raise SystemExit(f"Missing required columns in structure file: {path}:{sorted(missing)}")
         for row_number, row in enumerate(reader, start=2):
             patent_id = normalize_patent_id(row.get("patent_id"))
             smiles = str(row.get("canonical_smiles") or "").strip()
             if patent_id is None:
-                raise SystemExit(f"잘못된 구조 특허번호입니다: {path}:{row_number}")
+                raise SystemExit(f"Invalid structure patent identifier: {path}:{row_number}")
             if smiles:
                 structures[patent_id].add(smiles)
     return {patent_id: len(values) for patent_id, values in structures.items()}
@@ -431,35 +425,35 @@ def analyze_exposure_bias(
                 query_id = normalize_patent_id(row.get("query_patent_id"))
                 if query_id is None:
                     raise SystemExit(
-                        f"ranking query 특허번호가 잘못됐습니다: {path}:{row_number}"
+                        f"Invalid ranking query identifier: {path}:{row_number}"
                     )
                 if query_id in rankings_by_model[name]:
                     raise SystemExit(
-                        f"모델·query ranking이 중복됩니다: "
+                        f"Duplicate model/query ranking: "
                         f"{path}:{row_number}:{name}:{query_id}"
                     )
                 ranking = row.get("ranking")
                 if not isinstance(ranking, list):
-                    raise SystemExit(f"ranking 형식이 잘못됐습니다: {path}:{row_number}")
+                    raise SystemExit(f"Invalid ranking format: {path}:{row_number}")
                 normalized_ranking: list[tuple[str, float]] = []
                 for item in ranking:
                     patent_id = normalize_patent_id(item.get("patent_id"))
                     if patent_id is None:
-                        raise SystemExit(f"ranking 특허번호가 잘못됐습니다: {path}:{row_number}")
+                        raise SystemExit(f"Invalid ranking patent identifier: {path}:{row_number}")
                     normalized_ranking.append((patent_id, float(item["score"])))
                 rankings_by_model[name][query_id] = normalized_ranking
 
     if not rankings_by_model:
-        raise SystemExit("구조 수 편향 분석에 사용할 ranking이 없습니다")
+        raise SystemExit("No rankings available for structure-count bias analysis")
     ranking_model_names = set(rankings_by_model)
     if ranking_model_names != expected_model_names:
         raise SystemExit(
-            "query 결과와 ranking의 모델 이름 집합이 다릅니다: "
+            "Query-result and ranking model-name sets differ: "
             f"query_only={sorted(expected_model_names - ranking_model_names)}, "
             f"ranking_only={sorted(ranking_model_names - expected_model_names)}"
         )
     if not analysis_query_ids:
-        raise SystemExit("구조 수 편향 분석에 사용할 공통 query가 없습니다")
+        raise SystemExit("No common queries for structure-count bias analysis")
 
     source_query_counts = {
         name: len(query_rankings)
@@ -472,7 +466,7 @@ def analyze_exposure_bias(
     }
     if missing_queries:
         raise SystemExit(
-            "노출 편향 비교의 공통 query ranking이 누락됐습니다: "
+            "Missing common-query rankings for exposure-bias comparison: "
             + json.dumps(missing_queries, ensure_ascii=False, sort_keys=True)
         )
 
@@ -555,8 +549,8 @@ def analyze_exposure_bias(
         )
     metadata = {
         "policy": (
-            "paired 비교의 task별 query 합집합에 포함된 동일 query만 "
-            "모든 모델의 Top-k 노출 편향 분석에 사용"
+            "Use only identical queries in each task's paired-comparison query union "
+            "for Top-k exposure-bias analysis across all models"
         ),
         "analyzed_query_count": analyzed_query_count,
         "source_ranking_query_counts": source_query_counts,
@@ -604,7 +598,7 @@ def main() -> int:
         action="append",
         default=[],
         metavar="LABEL=PATH",
-        help="파일 내부 모델 이름 대신 명시적 분석 별칭을 적용한다",
+        help="Apply explicit analysis aliases instead of model names stored in files",
     )
     parser.add_argument("--rankings", type=Path, action="append", default=[])
     parser.add_argument(
@@ -613,7 +607,7 @@ def main() -> int:
         action="append",
         default=[],
         metavar="LABEL=PATH",
-        help="ranking 파일에 명시적 분석 별칭을 적용한다",
+        help="Apply explicit analysis aliases to ranking files",
     )
     parser.add_argument("--structures", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -630,11 +624,11 @@ def main() -> int:
         *((path, label) for label, path in args.rankings_labeled),
     ]
     if not per_query_inputs:
-        parser.error("--per-query 또는 --per-query-labeled를 하나 이상 지정해야 합니다")
+        parser.error("Specify at least one --per-query or --per-query-labeled input")
     if args.iterations < 1000 or args.random_iterations < 500:
-        parser.error("paired 반복은 1000회 이상, random 반복은 500회 이상이어야 합니다")
+        parser.error("Require at least 1000 paired repetitions and 500 random repetitions")
     if bool(ranking_inputs) != bool(args.structures):
-        parser.error("구조 수 편향 분석에는 --rankings와 --structures를 함께 지정해야 합니다")
+        parser.error("Structure-count bias analysis requires both --rankings and --structures")
     input_paths = [
         *(path for path, _ in per_query_inputs),
         *(path for path, _ in ranking_inputs),
@@ -643,7 +637,7 @@ def main() -> int:
         input_paths.append(args.structures)
     missing = [str(path) for path in input_paths if not path.is_file()]
     if missing:
-        raise SystemExit(f"입력 파일이 없습니다: {missing}")
+        raise SystemExit(f"Input file missing: {missing}")
 
     data, model_metadata = load_per_query(per_query_inputs)
     matched_queries = require_matched_queries(data)
@@ -756,16 +750,16 @@ def main() -> int:
     manifest = {
         "status": "completed",
         "paired_policy": (
-            "동일 task·query의 모델별 metric 차이에 query 단위 paired bootstrap과 "
-            "paired sign-flip 검정을 적용"
+            "Apply query-level paired bootstrap and paired sign-flip tests "
+            "to model metric differences for identical task/query pairs"
         ),
-        "multiple_comparison_policy": "task·metric별 모델쌍 p-value에 Holm 보정",
+        "multiple_comparison_policy": "Holm correction over model-pair p-values per task/metric",
         "paired_inference_resolution": {
             "sign_flip_tail": "two-sided absolute mean difference",
             "plus_one_correction": True,
             "permutation_iterations": args.iterations,
             "minimum_raw_p_value": 1.0 / (args.iterations + 1.0),
-            "family_unit": "각 task·metric 안의 모든 모델쌍",
+            "family_unit": "All model pairs within each task/metric",
             "model_count": len(data),
             "comparisons_per_family": math.comb(len(data), 2),
             "minimum_possible_first_rank_holm_adjusted_p_value": min(
@@ -773,19 +767,19 @@ def main() -> int:
                 math.comb(len(data), 2) / (args.iterations + 1.0),
             ),
             "interpretation": (
-                "반복 횟수로 정해지는 해상도 이하의 p-value를 주장하지 않으며, "
-                "최솟값은 해상도 제한으로 해석"
+                "Do not claim p-values below the repetition-dependent resolution; "
+                "interpret the minimum as resolution-limited"
             ),
         },
         "random_baseline_policy": (
-            "query별 실제 후보 수와 gold 수를 보존한 균등 무작위 순위를 반복 생성"
+            "Simulate uniform random rankings preserving actual candidate and gold counts per query"
         ),
         "random_baseline_inference": (
-            "현재 산출물은 기술적 기준선과 simulation interval이며, "
-            "모델 대 무작위의 다중비교 보정 p-value 검정은 수행하지 않음"
+            "Outputs are descriptive baselines and simulation intervals; "
+            "no multiplicity-corrected model-vs-random p-value test is performed"
         ),
         "candidate_count_policy": (
-            "구조 보유 공통 후보에서 query 자신을 제외한 실제 랭킹 후보 수 사용"
+            "Use actual structure-bearing common-candidate counts after excluding self"
         ),
         "model_metadata": model_metadata,
         "model_display_names": {

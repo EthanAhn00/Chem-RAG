@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Pairwise logistic ranker로 T1·T2 학습형 fusion을 탐색적으로 평가한다.
-
-기존 train query를 공유 gold 연결 컴포넌트 단위의 fit/development로
-나누고, development Citation MRR@100으로 규제 강도만 선택한다.
-선택 후 전체 train으로 재학습하고 기존 test를 한 번 평가한다.
-"""
+"""Exploratory learned T1/T2 fusion with a pairwise logistic ranker. Split existing train queries into fit/development by shared-gold connected components. Select regularization on development Citation MRR@100, retrain on all train queries, and evaluate the existing test set once."""
 
 from __future__ import annotations
 
@@ -24,7 +19,7 @@ try:
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
 except ImportError as exc:
-    raise SystemExit("scikit-learn이 필요합니다") from exc
+    raise SystemExit("scikit-learn is required") from exc
 
 try:
     from .evaluate_t2_structure_retrieval import evaluate_ranking
@@ -85,9 +80,9 @@ def parse_positive_grid(value: str) -> list[float]:
     try:
         values = sorted({float(item.strip()) for item in value.split(",")})
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("C 격자는 숫자여야 합니다") from exc
+        raise argparse.ArgumentTypeError("C grid must be numeric") from exc
     if not values or any(not math.isfinite(item) or item <= 0 for item in values):
-        raise argparse.ArgumentTypeError("C 격자는 0보다 큰 유한수여야 합니다")
+        raise argparse.ArgumentTypeError("C grid values must be finite and greater than 0")
     return values
 
 
@@ -124,9 +119,9 @@ def split_training_queries(
     development_fraction: float,
     seed: int,
 ) -> tuple[list[str], list[str], dict[str, Any]]:
-    """공유 gold로 연결된 query를 같은 fit/development 구간에 배치한다."""
+    """Place queries connected by shared gold in the same fit/development partition."""
     if not 0.05 <= development_fraction <= 0.5:
-        raise ValueError("development fraction은 0.05 이상 0.5 이하여야 합니다")
+        raise ValueError("Development fraction must be between 0.05 and 0.5")
     query_set = set(queries)
     union_find = UnionFind()
     for query_id in queries:
@@ -153,10 +148,10 @@ def split_training_queries(
         else:
             fit.extend(component)
     if not fit or not development:
-        raise ValueError("fit/development query를 모두 확보할 수 없습니다")
+        raise ValueError("Cannot obtain both fit and development query sets")
     overlap = set(fit) & set(development)
     if overlap or set(fit) | set(development) != query_set:
-        raise AssertionError("fit/development query 분리가 잘못됐습니다")
+        raise AssertionError("Invalid fit/development query partition")
     return sorted(fit), sorted(development), {
         "component_count": len(ordered),
         "largest_component_query_count": max(len(items) for items in ordered),
@@ -194,9 +189,9 @@ def candidate_features(
         )
     )
     if features.shape != (len(ids), len(FEATURE_NAMES)):
-        raise AssertionError("특징 행렬 크기가 잘못됐습니다")
+        raise AssertionError("Invalid feature-matrix shape")
     if not np.isfinite(features).all():
-        raise ValueError("특징에 유한수가 아닌 값이 있습니다")
+        raise ValueError("Features contain nonfinite values")
     return ids, features
 
 
@@ -261,7 +256,7 @@ def build_pairwise_training_data(
         missing_gold = gold - set(ids)
         if missing_gold:
             raise ValueError(
-                f"학습 query의 gold가 후보에 없습니다: {query_id}:{sorted(missing_gold)}"
+                f"Training-query gold absent from candidates: {query_id}:{sorted(missing_gold)}"
             )
         positive_indices = [id_to_index[item] for item in sorted(gold)]
         negative_indices = select_negative_indices(
@@ -274,7 +269,7 @@ def build_pairwise_training_data(
             stable_seed(seed, "negative", text_model, query_id),
         )
         if not positive_indices or not negative_indices:
-            raise ValueError(f"학습 pair를 만들 수 없습니다: {query_id}")
+            raise ValueError(f"Cannot construct training pairs: {query_id}")
         positive_count += len(positive_indices)
         negative_candidate_count += len(negative_indices)
         for positive_index in positive_indices:
@@ -316,7 +311,7 @@ def train_model(
     )
     model.fit(scaled, labels)
     if int(model.n_iter_[0]) >= model.max_iter:
-        raise RuntimeError("pairwise logistic ranker가 수렴하지 않았습니다")
+        raise RuntimeError("Pairwise logistic ranker did not converge")
     return scaler, model
 
 
@@ -356,7 +351,7 @@ def load_weighted_metrics(path: Path) -> dict[tuple[str, str, str], dict[str, st
                 continue
             key = (row["text_source"], row["task"], row["query_patent_id"])
             if key in output:
-                raise SystemExit(f"방법 2 per-query 행이 중복됩니다: {key}")
+                raise SystemExit(f"Duplicate method 2 per-query row: {key}")
             output[key] = row
     return output
 
@@ -408,7 +403,7 @@ def run_self_test() -> None:
     assert not ({"EP1A1", "EP2A1"} & set(fit) and {"EP1A1", "EP2A1"} & set(development))
     assert details["component_count"] == 2
     assert parse_positive_grid("1,0.1,1") == [0.1, 1.0]
-    print("자체 검증을 통과했습니다.")
+    print("Self-check passed.")
 
 
 def main() -> int:
@@ -457,14 +452,14 @@ def main() -> int:
     }
     missing = [name for name, value in required.items() if value is None]
     if missing:
-        parser.error(f"필수 인자가 없습니다: {', '.join(missing)}")
+        parser.error(f"Missing required arguments: {', '.join(missing)}")
     for name, path in required.items():
         if name != "--output-dir" and not path.is_file():
-            raise SystemExit(f"입력 파일이 없습니다: {path}")
+            raise SystemExit(f"Input file missing: {path}")
     if args.hard_negatives < 1 or args.random_negatives < 0:
-        parser.error("음성 샘플 수가 잘못됐습니다")
+        parser.error("Invalid negative-sample counts")
     if args.ranking_output_limit < 100 or args.iterations < 1000:
-        parser.error("ranking limit은 100 이상, iterations는 1000 이상이어야 합니다")
+        parser.error("Ranking limit must be at least 100 and iterations at least 1000")
 
     started_at = time.perf_counter()
     ground_truth = load_ground_truth(args.ground_truth, args.conflict_field)
@@ -478,14 +473,14 @@ def main() -> int:
         args.structure_per_query, "method"
     )
     if len(structure_models) != 1:
-        raise SystemExit(f"구조 모델은 하나만 허용합니다: {sorted(structure_models)}")
+        raise SystemExit(f"Only one structure model is allowed: {sorted(structure_models)}")
     structure_model = next(iter(structure_models))
     text_rankings, text_ranking_models = load_score_rankings(args.text_rankings, "source")
     structure_rankings, structure_ranking_models = load_score_rankings(
         args.structure_rankings, "method"
     )
     if text_models != text_ranking_models or structure_models != structure_ranking_models:
-        raise SystemExit("per-query와 ranking의 모델 집합이 다릅니다")
+        raise SystemExit("Per-query and ranking model sets differ")
     require_full_score_rankings(text_per_query, text_rankings, text_models, "T1")
     require_full_score_rankings(
         structure_per_query, structure_rankings, structure_models, "T2"
@@ -497,7 +492,7 @@ def main() -> int:
         text_queries = set(text_per_query[text_model][PRIMARY_TASK])
         structure_queries = set(structure_per_query[structure_model][PRIMARY_TASK])
         if text_queries != structure_queries:
-            raise SystemExit(f"T1·T2 query가 다릅니다: {text_model}")
+            raise SystemExit(f"T1/T2 queries differ: {text_model}")
         training_queries = {
             query_id
             for query_id in text_queries
@@ -509,7 +504,7 @@ def main() -> int:
             else common_training_queries & training_queries
         )
     if not common_training_queries:
-        raise SystemExit("학습 query가 없습니다")
+        raise SystemExit("No training queries")
     fit_queries, development_queries, internal_split = split_training_queries(
         sorted(common_training_queries),
         ground_truth,
@@ -635,7 +630,7 @@ def main() -> int:
                 gold = ground_truth[query_id][task]
                 if not gold:
                     raise SystemExit(
-                        f"평가 query의 gold가 비어 있습니다: {task}:{query_id}"
+                        f"Evaluation query has empty gold: {task}:{query_id}"
                     )
                 text_meta = text_per_query[text_model][task][query_id]
                 structure_meta = structure_per_query[structure_model][task][query_id]
@@ -644,14 +639,14 @@ def main() -> int:
                     or structure_meta["gold_count"] != len(gold)
                 ):
                     raise SystemExit(
-                        f"gold 수가 입력과 다릅니다: {task}:{query_id}"
+                        f"Gold count differs from input: {task}:{query_id}"
                     )
                 if (
                     text_meta["candidate_count_ranked"]
                     != structure_meta["candidate_count_ranked"]
                 ):
                     raise SystemExit(
-                        f"T1과 T2의 후보 수가 다릅니다: {task}:{query_id}"
+                        f"T1/T2 candidate counts differ: {task}:{query_id}"
                     )
                 ids, features = candidate_features(
                     text_rankings[text_model][query_id],
@@ -659,7 +654,7 @@ def main() -> int:
                 )
                 if len(ids) != text_meta["candidate_count_ranked"]:
                     raise SystemExit(
-                        f"ranking 후보 수가 per-query 입력과 다릅니다: "
+                        f"Ranking candidate count differs from per-query input: "
                         f"{task}:{query_id}"
                     )
                 learned = rank_candidates(ids, features, scaler, model)
@@ -668,14 +663,14 @@ def main() -> int:
                 text_metrics = evaluate_ranking(text_original, gold)
                 weighted_key = (text_model, task, query_id)
                 if weighted_key not in weighted_metrics:
-                    raise SystemExit(f"방법 2 test 행이 없습니다: {weighted_key}")
+                    raise SystemExit(f"Method 2 test row missing: {weighted_key}")
                 weighted_row = weighted_metrics[weighted_key]
                 if (
                     int(weighted_row["gold_count"]) != len(gold)
                     or int(weighted_row["candidate_count_ranked"]) != len(learned)
                 ):
                     raise SystemExit(
-                        f"방법 2와 학습형 fusion의 평가 단위가 다릅니다: "
+                        f"Method 2 and learned fusion use different evaluation units: "
                         f"{weighted_key}"
                     )
                 for metric in METRICS:
@@ -911,11 +906,11 @@ def main() -> int:
         "interpretation": "exploratory_supplementary",
         "feature_names": FEATURE_NAMES,
         "feature_policy": (
-            "query별 T1·T2 z-score, reciprocal log rank, z-score interaction"
+            "Per-query T1/T2 z-scores, reciprocal log ranks, and z-score interaction"
         ),
         "label_policy": (
-            "알려진 Citation gold만 positive로 사용; non-gold는 미확인 관련 특허를 "
-            "포함할 수 있어 완전한 negative로 해석하지 않음"
+            "Only known Citation gold is positive; non-gold may contain unverified relevant patents, "
+            "so it is not guaranteed to be truly negative"
         ),
         "negative_sampling": {
             "hard_per_modality": args.hard_negatives,
@@ -932,25 +927,25 @@ def main() -> int:
         "internal_training_split": {
             "development_fraction": args.development_fraction,
             **internal_split,
-            "warning": "공유 gold 연결 컴포넌트 분리이며 실제 family_id 기반은 아님",
+            "warning": "Split by shared-gold connected components, not actual family_id",
         },
         "regularization_selection": {
             "grid": args.c_grid,
             "task": PRIMARY_TASK,
             "metric": SELECTION_METRIC,
-            "tie_policy": "1e-12 이내 동률이면 가장 작은 C 선택",
+            "tie_policy": "Choose the smallest C for ties within 1e-12",
             "selected_by_text_source": {
                 source: selected_models[source][2] for source in sorted(selected_models)
             },
             "refit_on_all_outer_train_queries": True,
         },
         "training_details": training_details,
-        "candidate_policy": "T1·T2의 동일 전체 2,217개 후보 점수를 사용",
+        "candidate_policy": "Use T1/T2 scores for the same complete 2,217-candidate pool",
         "primary_task": PRIMARY_TASK,
         "secondary_task": "Conflict-X",
         "minimum_inference_queries": MINIMUM_INFERENCE_QUERIES,
         "small_sample_policy": (
-            "test query가 30개 미만이면 평균과 win/tie/loss만 기록"
+            "With fewer than 30 test queries, report only means and win/tie/loss"
         ),
         "text_sources": sorted(text_models),
         "structure_method": structure_model,
@@ -963,11 +958,11 @@ def main() -> int:
             "sign_flip_iterations": args.iterations,
             "base_seed": args.seed,
             "seed_policy": (
-                "base seed와 text source·task·metric·baseline을 SHA-256로 "
-                "결합한 고정 하위 seed"
+                "Derive fixed sub-seeds using SHA-256 of base seed and text source/task/metric/baseline "
+                "identifiers"
             ),
             "multiple_comparison_policy": (
-                "baseline·task·metric별 text source 비교에 Holm 보정"
+                "Holm correction across text-source comparisons per baseline/task/metric"
             ),
         },
         "ground_truth_field_mapping": {
@@ -975,9 +970,9 @@ def main() -> int:
             "Conflict-X": args.conflict_field,
         },
         "limitations": [
-            "실제 family_id 기반 분할이 아님",
-            "non-gold가 완전한 negative라는 보장이 없음",
-            "oracle-derived closed candidate pool 평가",
+            "Not an actual family_id-based split",
+            "Non-gold is not guaranteed to be truly negative",
+            "Evaluation on an oracle-derived closed candidate pool",
         ],
         "software": {
             "numpy": np.__version__,

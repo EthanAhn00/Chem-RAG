@@ -1,15 +1,5 @@
-"""
-coverage_report.json을 현재 data/db_export/*.csv 상태 그대로 다시 생성한다.
-db_export_1이 처음 만든 coverage_report.json은 그 시점 스냅샷이라, 이후
-db_export_2/3/4/5가 데이터를 채워도 값이 갱신되지 않고 남아있었다(예: claim_element
-rows: 0, pub_date 채움 0건 등 — 전부 이후 스크립트가 채운 뒤로 사실과 다름).
-
-이어서 실행할 스크립트 없음 (coverage_report.json 덮어씀).
-
-사용법 (맥 .venv):
-    python3 scripts/db_export/db_export_6_regenerate_coverage_report.py
-
-출력: data/db_export/coverage_report.json 갱신
+"""Regenerate coverage_report.json from current data/db_export/*.csv. The db_export_1 report is a historical snapshot not updated by db_export_2/3/4/5, leaving stale values such as claim_element rows: 0 and zero populated pub_date entries.
+Run python3 scripts/db_export/db_export_6_regenerate_coverage_report.py; overwrites data/db_export/coverage_report.json. No follow-up script is specified here.
 """
 import os
 import sys
@@ -22,11 +12,11 @@ from config.settings import DATA_DIR
 OUT_DIR = os.path.join(DATA_DIR, 'db_export')
 
 TABLE_NOTES = {
-    'patent_molecule': 'location(claim/description/figure) 구분 정보 없음 - 특허 단위 매칭만 가능',
-    'grounding_gold': 'claim_element_id는 TARGET 쪽 근사 조인이라 일부 부정확 - target_rel_claims 참고',
-    'exam_case': 'Task 2/3 착수 시 작업 예정 (미착수)',
-    'case_relevance': 'Task 2/3 착수 시 작업 예정 (미착수)',
-    'description_text(patent_content)': '의도적으로 비움 - paragraph 테이블이 문단 단위로 대체',
+    'patent_molecule': 'No claim/description/figure location breakdown; patent-level matching only',
+    'grounding_gold': 'Some TARGET claim_element_id joins are approximate; see target_rel_claims',
+    'exam_case': 'Planned when Task 2/3 work begins (not started)',
+    'case_relevance': 'Planned when Task 2/3 work begins (not started)',
+    'description_text(patent_content)': 'Intentionally empty; paragraph table provides paragraph-level text',
 }
 
 
@@ -57,7 +47,7 @@ def main():
             entry['note'] = TABLE_NOTES[name]
         coverage['tables'][name] = entry
 
-    # 자주 확인하는 몇 개 필드는 요약으로 따로 뽑아둠
+    # Summarize frequently inspected fields separately.
     pc = load('patent_content')
     if pc:
         coverage['patent_content_summary'] = {
@@ -68,9 +58,9 @@ def main():
             'filled_title': sum(1 for r in pc if r['title']),
             'filled_claims_text': sum(1 for r in pc if r['claims_text']),
             'has_structure_true': sum(1 for r in pc if r['has_structure'] == 'True'),
-            'ipc_codes_field_note': ('ipc_codes 컬럼명이 맞음 - 원본 데이터가 IPC(International '
-                                      'Patent Classification) 코드임(예: C08L, A01K). 스펙 문서의 '
-                                      '"cpc_codes" 표기가 오기(誤記)였음'),
+            'ipc_codes_field_note': ('ipc_codes is the correct column name: source data uses IPC (International '
+                                      'Patent Classification) codes, e.g. C08L, A01K. The specification\'s '
+                                      '"cpc_codes" label was a typo'),
         }
 
     ec = load('examiner_citation')
@@ -85,7 +75,7 @@ def main():
     with open(os.path.join(OUT_DIR, 'coverage_report.json'), 'w', encoding='utf-8') as f:
         json.dump(coverage, f, indent=2, ensure_ascii=False)
 
-    print('coverage_report.json 갱신 완료')
+    print('coverage_report.json updated')
     print(json.dumps(coverage.get('patent_content_summary', {}), indent=2, ensure_ascii=False))
 
 

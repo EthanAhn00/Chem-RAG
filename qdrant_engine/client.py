@@ -1,8 +1,4 @@
-"""Qdrant 클라이언트 팩토리 + 컬렉션/alias 관리.
-
-URL이 설정되어 있으면 서버 모드, 없으면 로컬 임베디드 모드(파일 경로)를 쓴다.
-어느 쪽이든 같은 API로 동작하므로 나머지 코드는 모드를 신경 쓰지 않는다.
-"""
+"""Qdrant client factory and collection/alias management. Use server mode when a URL is configured, otherwise local embedded storage. Both expose the same API to the remaining code."""
 import os
 import warnings
 
@@ -16,24 +12,17 @@ from .schemas import (
 
 
 class LocalStorageUnusableError(RuntimeError):
-    """로컬 임베디드 모드 저장소를 쓸 수 없을 때(예: SQLite가 동작하지 않는 파일시스템)."""
+    """Local embedded storage is unavailable, e.g. SQLite is unsupported by the filesystem."""
 
 
 def check_local_storage_writable(path):
-    """로컬 모드 저장소로 쓸 수 있는 경로인지 미리 확인한다.
-
-    qdrant 로컬 모드는 SQLite를 쓰는데, 일부 네트워크/FUSE 마운트에서는 파일 잠금이
-    지원되지 않아 'disk I/O error'가 난다. 그런 경로에 컬렉션 없는 빈 디렉토리만
-    남기면 '적재 성공'처럼 보이므로, 미리 검사해서 명확히 실패시킨다.
-
-    반환: (ok: bool, detail: str)
-    """
+    """Check whether a path supports local embedded storage. SQLite locking can fail on network/FUSE mounts with 'disk I/O error'. Fail explicitly instead of leaving an empty directory that could be mistaken for successful indexing. Return (ok: bool, detail: str)."""
     import sqlite3
     import tempfile
     try:
         os.makedirs(path, exist_ok=True)
     except OSError as exc:
-        return False, f'디렉토리 생성 실패: {exc}'
+        return False, f'Failed to create directory: {exc}'
     fd, probe = tempfile.mkstemp(prefix='.qdrant_sqlite_probe_', suffix='.db', dir=path)
     os.close(fd)
     try:
@@ -42,7 +31,7 @@ def check_local_storage_writable(path):
         con.execute("INSERT OR REPLACE INTO probe VALUES ('a', ?)", (b'x' * 64,))
         con.commit()
         con.close()
-        return True, 'sqlite 쓰기/잠금 정상'
+        return True, 'SQLite writes/locking OK'
     except Exception as exc:
         return False, f'{type(exc).__name__}: {exc}'
     finally:
@@ -53,7 +42,7 @@ def check_local_storage_writable(path):
 
 
 def get_client(settings=None, skip_storage_check=False):
-    """설정에 따라 서버 클라이언트 또는 로컬 임베디드 클라이언트를 만든다."""
+    """Create a server or local embedded client from settings."""
     settings = settings or load_settings()
     if settings.url:
         return QdrantClient(
@@ -66,14 +55,14 @@ def get_client(settings=None, skip_storage_check=False):
         ok, detail = check_local_storage_writable(settings.local_path)
         if not ok:
             raise LocalStorageUnusableError(
-                f"로컬 Qdrant 저장소를 쓸 수 없습니다: {settings.local_path}\n"
-                f"  원인: {detail}\n"
-                f"  이 경로의 파일시스템이 SQLite 파일 잠금을 지원하지 않습니다"
-                f"(네트워크/FUSE 마운트에서 흔함).\n"
-                f"  해결: 로컬 디스크 경로를 쓰거나(CHEMRAG_QDRANT_LOCAL_PATH),"
-                f" 서버 모드(CHEMRAG_QDRANT_URL)를 사용하세요.\n"
-                f"  다른 머신에서 만든 스냅샷이 있다면"
-                f" scripts/qdrant_restore_snapshot.py 로 복원할 수 있습니다.")
+                f"Local Qdrant storage is unavailable: {settings.local_path}\n"
+                f"  Cause: {detail}\n"
+                f"  This filesystem does not support SQLite file locking"
+                f" (common on network/FUSE mounts).\n"
+                f"  Use a local disk path (CHEMRAG_QDRANT_LOCAL_PATH)"
+                f" or server mode (CHEMRAG_QDRANT_URL).\n"
+                f"  A snapshot exported on another machine can be restored with"
+                f" scripts/qdrant_restore_snapshot.py.")
     os.makedirs(settings.local_path, exist_ok=True)
     return QdrantClient(path=settings.local_path)
 
@@ -90,18 +79,17 @@ def collection_exists(client, name):
 
 
 def create_payload_indexes(client, collection, index_specs, local_mode=False):
-    """payload 인덱스 생성 시도. 로컬 모드에서는 효과가 없다는 경고만 나오므로
-    성공/무효과 여부를 그대로 돌려준다(조용히 성공한 척하지 않는다)."""
+    """Attempt payload index creation. Local mode may only warn without creating indexes; report success/no-effect explicitly rather than implying success."""
     created, no_effect, failed = [], [], []
     for field_name, schema in index_specs:
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
                 client.create_payload_index(collection, field_name, field_schema=schema)
-            # 로컬 임베디드 모드에서는 호출은 성공하지만 실제 인덱스가 만들어지지 않는다.
-            # 성공한 척하지 않기 위해 모드에 따라 분류를 달리한다.
+            # Embedded mode accepts the call but does not actually create payload indexes.
+            # Classify the outcome by mode instead of implying successful index creation.
             (no_effect if local_mode else created).append(field_name)
-        except Exception as exc:  # 이미 존재하는 인덱스 등
+        except Exception as exc:  # For example, an index already exists.
             failed.append(f'{field_name}({type(exc).__name__})')
     return created, no_effect, failed
 
@@ -129,7 +117,7 @@ def ensure_structure_collection(client, settings, recreate=False):
     if not collection_exists(client, name):
         client.create_collection(
             name,
-            vectors_config={},                       # dense 벡터 없음 - 지문 sparse 벡터만 사용
+            vectors_config={},                       # No dense vectors; use sparse fingerprints only.
             sparse_vectors_config=structure_sparse_config(),
         )
     created, no_effect, failed = create_payload_indexes(
@@ -138,16 +126,11 @@ def ensure_structure_collection(client, settings, recreate=False):
             'payload_indexes_no_effect_local_mode': no_effect, 'payload_indexes_failed': failed}
 
 
-_create_payload_indexes = create_payload_indexes  # 하위 호환 별칭
+_create_payload_indexes = create_payload_indexes  # Backward-compatible aliases.
 
 
 def verify_alias(client, alias_name, expected_collection):
-    """alias 생성 API 호출이 성공했다는 것과 실제로 alias가 만들어졌다는 것은 다른 얘기다
-    (API가 예외 없이 반환해도 일부 백엔드/버전에서는 실제로 아무 효과가 없을 수 있음).
-    alias 목록을 다시 조회해 실제 존재 여부와 대상 컬렉션이 맞는지 확인한다.
-
-    반환: {'exists': bool, 'target_collection': str|None, 'matches_expected': bool,
-          'verify_error': str(있으면)}"""
+    """An alias API call returning without error does not prove an alias was created; some backends/versions have no effect. Re-read aliases to verify existence and target. Return {'exists': bool, 'target_collection': str|None, 'matches_expected': bool, 'verify_error': str if present}."""
     try:
         aliases = client.get_collection_aliases(expected_collection).aliases
     except Exception as exc:
@@ -161,9 +144,7 @@ def verify_alias(client, alias_name, expected_collection):
 
 
 def ensure_alias(client, alias_name, collection_name):
-    """alias -> collection 연결. API 호출 성공만 믿지 않고, 생성을 시도한 뒤 실제 alias
-    목록을 다시 조회해 존재/대상 일치 여부를 검증해서 함께 반환한다(API가 예외 없이
-    반환했다고 해서 실제로 걸렸다고 단정하지 않기 위함)."""
+    """Link alias -> collection, then re-read aliases and report verified existence/target matching. An API call without exception is not sufficient evidence of an actual alias."""
     try:
         client.update_collection_aliases(
             change_aliases_operations=[
@@ -188,7 +169,7 @@ def ensure_alias(client, alias_name, collection_name):
 
 
 def resolve_collection(client, alias_or_name):
-    """alias가 있으면 실제 컬렉션명으로, 없으면 입력 그대로 돌려준다."""
+    """Resolve an alias to its collection; otherwise return the input unchanged."""
     try:
         for a in client.get_collection_aliases(alias_or_name).aliases:
             if a.alias_name == alias_or_name:

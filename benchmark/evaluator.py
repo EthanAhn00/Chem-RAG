@@ -3,40 +3,33 @@ import json
 import time
 
 def _average_precision(sorted_records):
-    """정렬된(내림차순 final_hybrid_score) 레코드 리스트 하나에 대한 AP 계산 -
-    정답(label==1)을 만날 때마다 그 지점까지의 precision을 기록하고 평균"""
+    """Compute AP for records sorted by descending final_hybrid_score; average precision at each positive (label==1)."""
     precisions = []
     num_correct = 0
     for i, r in enumerate(sorted_records):
         if r['ground_truth_label'] == 1:
             num_correct += 1
             precisions.append(num_correct / float(i + 1))
-    return sum(precisions) / float(len(precisions)) if precisions else None  # None = 정답이 없어 AP 정의 불가
+    return sum(precisions) / float(len(precisions)) if precisions else None  # None means AP is undefined because there are no positives.
 
 
 class ChemicalRAGEvaluator:
-    """정답 인용 라벨을 기준으로 Chemical RAG 검색·랭킹 성능 지표(MAP, Hit@K)를 평가
+    """Evaluate Chemical RAG retrieval/ranking using citation labels (MAP, Hit@K).
 
-    두 가지 MAP 정의를 모두 제공:
-      - evaluate_ranking_performance(): "micro" 방식 - 쿼리 구분 없이 전체
-        (target, prior) 쌍을 하나의 랭킹 리스트로 취급해 계산한 단일 AP.
-        표준 IR 정의가 아님(쿼리별 난이도가 섞여버려 특정 target에 후보가 몰려
-        있으면 그쪽에 결과가 쏠림) - 참고용으로만 남겨둠(레거시 호환)
-      - evaluate_ranking_performance_per_query(): 표준 IR MAP 정의 - target
-        특허(쿼리)별로 그룹을 나눠 그룹 안에서 prior 후보들을 랭킹, 쿼리마다
-        AP를 구한 뒤 "정답이 하나 이상 있는 쿼리"만 대상으로 평균. 이게 논문/
-        미팅에 보고할 "진짜" MAP
+    Two definitions are retained:
+    - evaluate_ranking_performance(): legacy micro AP over one ranking of all (target, prior) pairs, without separating queries. This is not standard IR MAP: query difficulty and unequal candidate counts can bias the result. Retained for reference and backward compatibility.
+    - evaluate_ranking_performance_per_query(): group by target patent, rank prior candidates within each query, compute AP, and average over queries with at least one positive. This is the query-level MAP used for reporting.
     """
 
     def __init__(self):
         pass
 
     def evaluate_ranking_performance(self, scored_records, label=None):
-        # MAP(micro, 레거시), Hit@1, Hits@5 계산. `label`은 결과 구분용 설명 값(예: 'full' / 'test_leakfree')
+        # Compute legacy micro MAP, Hit@1 and Hits@5. `label` describes the result subset (e.g. 'full' / 'test_leakfree').
         if not scored_records:
             return {'label': label, 'evaluated_records': 0, 'note': 'no records in this subset'}
 
-        # 최종 하이브리드 점수 내림차순 정렬
+        # Sort by descending final hybrid score.
         sorted_records = sorted(scored_records, key=lambda x: x['ranking_res']['final_hybrid_score'], reverse=True)
 
         total_positives = sum(1 for r in sorted_records if r['ground_truth_label'] == 1)
@@ -67,11 +60,7 @@ class ChemicalRAGEvaluator:
         }
 
     def evaluate_ranking_performance_per_query(self, scored_records, label=None):
-        """표준 IR 정의의 MAP - target_patent_id(쿼리)별로 그룹핑해 쿼리별 AP를
-        구한 뒤 평균. target_patent_id가 없는 레코드는(EP 특허번호 복원 실패)
-        쿼리를 특정할 수 없어 집계에서 제외하고 별도로 카운트만 보고함 - 임의로
-        filename 등으로 대체 키를 만들어 억지로 포함시키지 않음(잘못된 그룹핑으로
-        수치를 왜곡하지 않기 위해)"""
+        """Compute query-level IR MAP grouped by target_patent_id. Exclude and count records missing target_patent_id (unresolved EP identifiers); do not invent filename-based replacement keys that would distort query grouping."""
         if not scored_records:
             return {'label': label, 'evaluated_records': 0, 'note': 'no records in this subset'}
 
@@ -88,8 +77,8 @@ class ChemicalRAGEvaluator:
             return {'label': label, 'error': 'No records with a resolvable target_patent_id (query id) found.',
                     'excluded_no_query_id': excluded_no_query_id}
 
-        # 쿼리 그룹 크기 분포(디버그/검증용) - 그룹당 후보가 1개뿐이면(=target마다 prior가
-        # 정확히 하나) 표준 MAP이 사실상 accuracy와 비슷해지므로, 실제 구조를 눈으로 확인할 수 있게 남김
+        # Inspect query-group sizes; with only one candidate per target,
+        # MAP effectively resembles accuracy. Keep the distribution visible for diagnostics.
         group_sizes = sorted(len(v) for v in groups.values())
         n = len(group_sizes)
         size_distribution = {
@@ -101,10 +90,10 @@ class ChemicalRAGEvaluator:
         }
 
         per_query_aps = []
-        # 후보가 2개 이상인 쿼리만 따로 모음 - 후보가 1개뿐인 쿼리는 랭킹을 전혀 하지
-        # 않고(비교 대상이 없음) 그 1개가 정답이면 AP가 자동으로 1.0이 되므로, 이런
-        # 쿼리가 대다수면 전체 MAP이 "모델이 잘 랭킹해서"가 아니라 "애초에 비교할 게
-        # 없어서" 높게 나오는 착시가 생김 - multi_candidate 지표로 이 착시를 분리해서 보고
+        # Also report queries with at least 2 candidates. A single-candidate query
+        # requires no ranking; if that candidate is positive, AP is automatically 1.0.
+        # Many such queries can inflate MAP through lack of competition rather than
+        # ranking quality. Report multi_candidate metrics separately to expose this effect.
         per_query_aps_multi = []
         hits_at_1_count = 0
         hits_at_5_count = 0
@@ -114,7 +103,7 @@ class ChemicalRAGEvaluator:
             sorted_records = sorted(records, key=lambda x: x['ranking_res']['final_hybrid_score'], reverse=True)
             ap = _average_precision(sorted_records)
             if ap is None:
-                queries_no_positive += 1  # 이 쿼리엔 정답 라벨이 없어 AP 정의 불가 - 평균에서 제외
+                queries_no_positive += 1  # No positive labels: AP is undefined; exclude this query from the mean.
                 continue
             per_query_aps.append(ap)
             is_hit_1 = sorted_records[0]['ground_truth_label'] == 1
@@ -143,8 +132,8 @@ class ChemicalRAGEvaluator:
             'hit_at_1_rate': round(hits_at_1_count / len(per_query_aps), 4),
             'avg_hits_at_5': round(hits_at_5_count / len(per_query_aps), 4),
             'mean_average_precision_map': round(mean_ap, 4),
-            # 후보 2개 이상(=실제 랭킹이 일어나는) 쿼리만 대상으로 한 MAP - 전체 MAP과
-            # 이 값의 차이가 크면, 전체 MAP이 단일 후보 쿼리들 때문에 부풀려진 것
+            # MAP for queries with at least 2 candidates, where ranking actually occurs.
+            # A large gap from overall MAP indicates inflation by single-candidate queries.
             'num_queries_multi_candidate': len(per_query_aps_multi),
             'hit_at_1_rate_multi_candidate': round(hits_at_1_count_multi / len(per_query_aps_multi), 4) if per_query_aps_multi else None,
             'mean_average_precision_map_multi_candidate_only': round(mean_ap_multi, 4) if mean_ap_multi is not None else None,

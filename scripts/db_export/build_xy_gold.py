@@ -1,30 +1,8 @@
-"""X+Y 통합 gold 생성 - 선행기술 검색 평가용 정답 집합.
-
-배경:
-    기존 gold(`data/db_export/examiner_citation.csv`, 1,254쌍)는 EPO search report
-    category가 전부 X 계열이다(X / X,P / X,D / X,D,P). X는 단독으로 신규성·진보성을
-    부정하는 가장 강한 선행기술이다.
-
-    별도로 확보한 `epo_dataset/in_corpus_candidate_pairs.csv`(1,439쌍)는 위 집합과
-    쌍 기준 교집합이 0이며, A(단순 기술 배경) 784쌍이 절반 이상을 차지한다.
-    선행기술 검색 IR 관례(CLEF-IP 등)를 따라 **X와 Y만 relevant로 채택**하고
-    A / E / T / L 은 제외한다.
-
-산출물(원본 CSV는 읽기만 하고 절대 수정하지 않는다):
-    data/db_export/derived/gold_xy_v1.csv
-    data/db_export/derived/gold_xy_v1_summary.json
-
-검증(하나라도 실패하면 종료 코드 1, 파일을 쓰지 않는다):
-    - 두 소스의 쌍이 겹치지 않는지
-    - 모든 특허가 코퍼스(patent_content.csv) 안에 있는지
-    - 시간 필터: cited.pub_date <= query.app_date
-    - family 필터: cited.family_id != query.family_id
-
-    시간/family를 위반하는 쌍은 검색 파이프라인이 후보에서 제외하므로
-    gold에 넣으면 '절대 찾을 수 없는 정답'이 되어 MAP 상한을 깎는다.
-
-    python3 scripts/db_export/build_xy_gold.py
-    python3 scripts/db_export/build_xy_gold.py --pairs-csv /경로/in_corpus_candidate_pairs.csv
+"""Build X+Y gold for prior-art retrieval.
+Legacy data/db_export/examiner_citation.csv has 1,254 X-category pairs (X / X,P / X,D / X,D,P); X is particularly relevant on its own. The separate epo_dataset/in_corpus_candidate_pairs.csv has 1,439 pairs, no pair overlap with legacy gold, and 784 background A pairs. Following prior-art IR conventions such as CLEF-IP, retain X/Y and exclude A/E/T/L.
+Inputs are read-only. Outputs: data/db_export/derived/gold_xy_v1.csv and gold_xy_v1_summary.json.
+Fail with exit code 1 and write nothing on overlapping source pairs, patents outside patent_content.csv, cited.pub_date > query.app_date, or matching cited/query family_id. Such filtered-out gold would be unretrievable and lower the attainable MAP.
+Usage: python3 scripts/db_export/build_xy_gold.py [--pairs-csv /path/to/in_corpus_candidate_pairs.csv].
 """
 import os
 import sys
@@ -51,7 +29,7 @@ def category_tokens(value):
 
 
 def primary_grade(value):
-    """category에 X가 있으면 2, Y만 있으면 1, 둘 다 없으면 None."""
+    """Return 2 for X, 1 for Y without X, or None for neither."""
     toks = category_tokens(value)
     if 'X' in toks:
         return GRADE['X']
@@ -69,15 +47,15 @@ def load_corpus_meta():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--pairs-csv', default=DEFAULT_PAIRS,
-                    help='in_corpus_candidate_pairs.csv 경로(저장소 밖에 있을 수 있음)')
-    ap.add_argument('--dry-run', action='store_true', help='파일을 쓰지 않고 통계만 출력')
+                    help='Path to in_corpus_candidate_pairs.csv (may be outside the repository)')
+    ap.add_argument('--dry-run', action='store_true', help='Print statistics without writing files')
     args = ap.parse_args()
 
     meta = load_corpus_meta()
     problems = []
     rows = []
 
-    # --- 소스 1: examiner_citation.csv (기존 gold, X 계열) ---
+    # --- Source 1: examiner_citation.csv (legacy X-category gold) ---
     ec_path = os.path.join(DATA_DIR, 'db_export', 'examiner_citation.csv')
     with open(ec_path, newline='', encoding='utf-8') as f:
         ec = list(csv.DictReader(f))
@@ -85,7 +63,7 @@ def main():
     for r in ec:
         grade = primary_grade(r['category'])
         if grade is None:
-            problems.append(f"examiner_citation에 X/Y 아닌 category: {r['category']}")
+            problems.append(f"Non-X/Y category in examiner_citation: {r['category']}")
             continue
         rows.append({
             'query_patent_id': r['query_patent_id'],
@@ -96,10 +74,10 @@ def main():
         })
         ec_kept += 1
 
-    # --- 소스 2: in_corpus_candidate_pairs.csv 중 X/Y 계열만 ---
+    # --- Source 2: X/Y pairs from in_corpus_candidate_pairs.csv ---
     pairs_path = os.path.abspath(args.pairs_csv)
     if not os.path.exists(pairs_path):
-        raise SystemExit(f'입력 파일 없음: {pairs_path}')
+        raise SystemExit(f'Input file missing: {pairs_path}')
     with open(pairs_path, newline='', encoding='utf-8') as f:
         pr = list(csv.DictReader(f))
     ic_kept = 0
@@ -118,7 +96,7 @@ def main():
         })
         ic_kept += 1
 
-    # --- 검증 ---
+    # --- Validation ---
     seen = {}
     dup = 0
     for r in rows:
@@ -126,7 +104,7 @@ def main():
         if key in seen:
             dup += 1
             if seen[key] != r['source']:
-                problems.append(f'두 소스에 중복된 쌍: {key}')
+                problems.append(f'Pairs overlapping between sources: {key}')
         seen[key] = r['source']
 
     out_of_corpus = time_violation = family_violation = missing_date = 0
@@ -144,11 +122,11 @@ def main():
         if qf and cf and qf == cf:
             family_violation += 1
 
-    for label, n in (('코퍼스 밖 특허', out_of_corpus), ('시간 필터 위반', time_violation),
-                     ('family 동일', family_violation), ('날짜 결측', missing_date),
-                     ('중복 쌍', dup)):
+    for label, n in (('patents outside corpus', out_of_corpus), ('time-filter violations', time_violation),
+                     ('same family', family_violation), ('missing dates', missing_date),
+                     ('duplicate pairs', dup)):
         if n:
-            problems.append(f'{label}: {n}건')
+            problems.append(f'{label}: {n} records')
 
     queries = sorted({r['query_patent_id'] for r in rows})
     summary = {
@@ -178,13 +156,13 @@ def main():
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if problems:
-        print('\n검증 실패:', file=sys.stderr)
+        print('\nValidation failed:', file=sys.stderr)
         for p in problems[:20]:
             print(f'  - {p}', file=sys.stderr)
         raise SystemExit(1)
 
     if args.dry_run:
-        print('\n--dry-run: 파일을 쓰지 않았습니다.')
+        print('\n--dry-run: no files were written.')
         return 0
 
     os.makedirs(DERIVED_DIR, exist_ok=True)
@@ -196,8 +174,8 @@ def main():
         w.writerows(rows)
     with open(OUT_JSON, 'w', encoding='utf-8') as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
-    print(f'\n저장: {OUT_CSV} ({len(rows)}쌍)')
-    print(f'저장: {OUT_JSON}')
+    print(f'\nSaved: {OUT_CSV} ({len(rows)} pairs)')
+    print(f'Saved: {OUT_JSON}')
     return 0
 
 

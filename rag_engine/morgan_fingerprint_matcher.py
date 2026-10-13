@@ -1,18 +1,15 @@
 from rdkit import Chem, DataStructs, RDLogger
 from rdkit.Chem import AllChem
 
-# 유효하지 않거나 빈 SMILES 문자열에 대한 RDKit C++ 파서 경고 억제
+# Suppress RDKit C++ parser warnings for invalid or empty SMILES.
 RDLogger.DisableLog('rdApp.*')
 
 
 class MorganFingerprintMatcher:
-    """Morgan 2048-bit Fingerprint 기반 화학구조 Tanimoto 유사도 매처
+    """Chemical-structure similarity using Morgan 2048-bit fingerprints and Tanimoto.
 
-    RDKit의 결정론적(deterministic) 화학정보학 알고리즘(학습 없음). 분자를 원자
-    주변 반경 2(ECFP4)로 순회해 2048비트 벡터로 해시한 뒤 Tanimoto 계수를 계산
-
-    실제 SMILES 문자열만 입력으로 받으며, 두 입력 중 하나라도 유효한 분자로
-    파싱되지 않으면 None을 반환(청구항 텍스트를 SMILES로 대신 취급하는 폴백 없음)
+    RDKit's deterministic algorithm requires no training: atom neighborhoods of radius 2 (ECFP4) are hashed into a 2048-bit vector and compared by Tanimoto.
+    Accepts actual SMILES only. Return None if either input cannot be parsed as a molecule; never treat claim text as a substitute SMILES.
     """
 
     def __init__(self):

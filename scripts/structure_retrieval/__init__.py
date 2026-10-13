@@ -1,2 +1,2 @@
-"""SMILES 기반 특허 구조 검색 실험 도구."""
+"""SMILES-based patent structure retrieval experiments."""
 

@@ -1,9 +1,5 @@
-"""full-index 검증 - 실제 4,123 / 6,928 포인트 DB가 있어야 통과한다.
-
-DB가 없거나 비어 있으면 실패한다(skip 하지 않는다). 실패가 하나라도 있으면 종료 코드 1.
-
-    python3 scripts/qdrant/qdrant_verify_index.py
-    python3 scripts/qdrant/qdrant_verify_index.py --json-out benchmark/results/qdrant_verify_report.json
+"""Full-index verification requires actual DB points: 4,123 patents / 6,928 structures. Missing/empty DB is failure, not a skip. Any failure exits 1.
+Usage: python3 scripts/qdrant/qdrant_verify_index.py [--json-out benchmark/results/qdrant_verify_report.json].
 """
 import os
 import sys
@@ -75,7 +71,7 @@ def scroll_all(client, collection, with_vectors=False, batch=1000):
 
 
 def scroll_ids_with_filter(client, collection, qfilter, batch=1000):
-    """필터에 걸린 모든 포인트의 patent_id 집합(랭킹과 무관하게 필터만 검증)."""
+    """All patent_ids passing the filter; verify filtering independently of ranking."""
     out, offset = set(), None
     while True:
         points, offset = client.scroll(collection, scroll_filter=qfilter, limit=batch,
@@ -88,7 +84,7 @@ def scroll_ids_with_filter(client, collection, qfilter, batch=1000):
 
 
 def pick_boundary_queries(patents, citations):
-    """경계조건을 포함한 결정적(deterministic) 검증 표본을 만든다."""
+    """Build deterministic verification samples including boundary cases."""
     by_id = {r['patent_id']: r for r in patents}
     with_gold = sorted(q for q in citations if q in by_id)
 
@@ -103,22 +99,22 @@ def pick_boundary_queries(patents, citations):
             picked.append(pid)
             reasons[pid] = why
 
-    # (1) 후보 중에 pub_date == query.app_date 인 경계 케이스(<= 이므로 포함되어야 함)
+    # (1) Equality boundary: candidate.pub_date == query.app_date must pass <=.
     for q in with_gold:
         if pub_dates.get(by_id[q]['app_date']):
             add(q, 'boundary_equal_date(candidate.pub_date == query.app_date)')
             break
-    # (2) app_date 가 비어 있는 쿼리(시간 필터 미적용 정책)
+    # (2) Queries with missing app_date skip time filtering.
     for q in with_gold:
         if not (by_id[q].get('app_date') or '').strip():
             add(q, 'missing_app_date')
             break
-    # (3) family_id 가 비어 있는 쿼리(패밀리 필터 미적용 정책)
+    # (3) Queries with missing family_id skip family filtering.
     for q in with_gold:
         if not (by_id[q].get('family_id') or '').strip():
             add(q, 'missing_family_id')
             break
-    # (4) 같은 family 특허가 실제로 여러 건 있는 쿼리
+    # (4) Queries with multiple actual same-family patents.
     fam = defaultdict(list)
     for r in patents:
         fam[r['family_id']].append(r['patent_id'])
@@ -126,11 +122,11 @@ def pick_boundary_queries(patents, citations):
         if len(fam.get(by_id[q]['family_id'], [])) > 1:
             add(q, 'has_same_family_siblings')
             break
-    # (5) 가장 이른/늦은 출원일
+    # (5) Earliest/latest filing dates.
     for q in (min(with_gold, key=lambda x: by_id[x]['app_date']),
               max(with_gold, key=lambda x: by_id[x]['app_date'])):
         add(q, 'extreme_app_date')
-    # (6) 정렬 기준 균등 표본(재현 가능)
+    # (6) Uniform sorted samples for reproducibility.
     step = max(len(with_gold) // 10, 1)
     for q in with_gold[::step][:10]:
         add(q, 'deterministic_sample')
@@ -148,12 +144,12 @@ def main():
     c = Checker()
     violations_summary = {}
 
-    print('\n=== 0. 실행 환경 ===')
+    print('\n=== 0. Execution environment ===')
     prov = runtime_provenance(settings, ' '.join(sys.argv))
-    c.info('Qdrant 모드/위치', f"{prov['qdrant']['mode']} @ {prov['qdrant']['url_or_path']}")
+    c.info('Qdrant mode/location', f"{prov['qdrant']['mode']} @ {prov['qdrant']['url_or_path']}")
     c.info('python / qdrant-client', f"{prov['python_version']} / {prov['packages']['qdrant-client']}")
 
-    print('\n=== 1. 원본 CSV 무결성 ===')
+    print('\n=== 1. Source CSV integrity ===')
     checksum_path = os.path.join(DERIVED_DIR, 'original_csv_checksums.json')
     if os.path.exists(checksum_path):
         with open(checksum_path, 'r', encoding='utf-8') as f:
@@ -161,17 +157,17 @@ def main():
         changed = [fname for fname, meta in baseline.items()
                    if not os.path.exists(os.path.join(DB_EXPORT_DIR, fname))
                    or file_digest(os.path.join(DB_EXPORT_DIR, fname)) != meta['sha256']]
-        c.check('원본 db_export CSV가 변경되지 않음', not changed, changed or f'{len(baseline)}개 확인')
+        c.check('Original db_export CSVs unchanged', not changed, changed or f'{len(baseline)} checked')
     else:
-        c.check('원본 CSV 체크섬 기준 파일 존재', False, f'{checksum_path} 없음')
+        c.check('Source CSV checksum reference exists', False, f'{checksum_path} missing')
 
-    print('\n=== 2. 특허 컬렉션 ===')
+    print('\n=== 2. Patent collection ===')
     try:
         pc = client.count(settings.patents_collection).count
     except Exception as exc:
-        c.check(f'특허 컬렉션({settings.patents_collection}) 존재', False, f'{type(exc).__name__}: {exc}')
+        c.check(f'Patent collection ({settings.patents_collection}) exists', False, f'{type(exc).__name__}: {exc}')
         pc = -1
-    c.check(f'특허 포인트 수 == {EXPECTED_PATENTS}', pc == EXPECTED_PATENTS, f'실제 {pc}')
+    c.check(f'Patent point count == {EXPECTED_PATENTS}', pc == EXPECTED_PATENTS, f'actual {pc}')
 
     info = client.get_collection(settings.patents_collection)
     vectors_cfg = info.config.params.vectors or {}
@@ -186,11 +182,11 @@ def main():
     expected_dim = encoders['title_claims']['dense'].dim
 
     for field, spec in TEXT_FIELDS.items():
-        c.check(f'dense 벡터 존재/차원 일치 ({spec["dense"]})',
+        c.check(f'Dense vectors exist with matching dimensions ({spec["dense"]})',
                 spec['dense'] in vectors_cfg and vectors_cfg[spec['dense']].size == expected_dim,
                 f'collection={vectors_cfg.get(spec["dense"]).size if spec["dense"] in vectors_cfg else None}, '
                 f'encoder={expected_dim}')
-        c.check(f'sparse 벡터 존재 ({spec["sparse"]})', spec['sparse'] in sparse_cfg)
+        c.check(f'Sparse vectors exist ({spec["sparse"]})', spec['sparse'] in sparse_cfg)
 
     split_rows = {r['id']: r for r in load_rows('split')}
     patents = load_rows('patent_content')
@@ -218,43 +214,43 @@ def main():
         for f, s in (pl.get('embedding_signature_by_field') or {}).items():
             sig_by_field[f].add(s)
 
-    c.check('모든 특허 포인트에 patent_id 존재', missing_pid == 0, f'누락 {missing_pid}')
-    c.check('모든 dense 벡터 차원이 스키마와 일치', dim_mismatch == 0, f'불일치 {dim_mismatch}')
-    c.check('split.csv role/split/time_cutoff 결합 정확', role_mismatch == 0, f'불일치 {role_mismatch}')
-    c.check('포인트 ID가 UUID5(patent_id) 정책과 일치', id_mismatch == 0, f'불일치 {id_mismatch}')
-    c.check('특허 ID 집합이 patent_content.csv와 동일',
+    c.check('All patent points contain patent_id', missing_pid == 0, f'missing {missing_pid}')
+    c.check('All dense dimensions match the schema', dim_mismatch == 0, f'mismatches {dim_mismatch}')
+    c.check('split.csv role/split/time_cutoff joined correctly', role_mismatch == 0, f'mismatches {role_mismatch}')
+    c.check('Point IDs follow UUID5(patent_id)', id_mismatch == 0, f'mismatches {id_mismatch}')
+    c.check('Patent-ID set matches patent_content.csv',
             seen_ids == {r['patent_id'] for r in patents},
-            f'컬렉션 {len(seen_ids)} vs CSV {len(patents)}')
+            f'Collection {len(seen_ids)} vs CSV {len(patents)}')
 
-    print('\n=== 3. 임베딩 인코더 일치 ===')
+    print('\n=== 3. Embedding encoder consistency ===')
     for field in TEXT_FIELDS:
         stored = sig_by_field.get(field, set())
         current = encoders[field]['dense'].signature()
-        c.check(f'적재 시 인코더 == 검색 시 인코더 ({field})',
+        c.check(f'Indexing encoder == search encoder ({field})',
                 len(stored) == 1 and current in stored, f'stored={stored}, current={current}')
-    c.info('dense 인코더', encoders['title_claims']['dense'].describe())
-    c.check('dense 백엔드가 실제 사전학습 semantic 모델',
+    c.info('Dense encoder', encoders['title_claims']['dense'].describe())
+    c.check('Dense backend is a pretrained semantic model',
             encoders['title_claims']['dense'].name != 'hashing',
             encoders['title_claims']['dense'].name)
 
-    print('\n=== 4. 멱등성 ===')
+    print('\n=== 4. Idempotence ===')
     sample = list(client.scroll(settings.patents_collection, limit=5,
                                 with_payload=True, with_vectors=True)[0])
     before = client.count(settings.patents_collection).count
     client.upsert(settings.patents_collection, points=[
         models.PointStruct(id=p.id, vector=p.vector, payload=p.payload) for p in sample], wait=True)
     after = client.count(settings.patents_collection).count
-    c.check('동일 포인트 재적재 후 포인트 수 불변', before == after, f'{before} -> {after}')
+    c.check('Re-upserting identical points preserves point count', before == after, f'{before} -> {after}')
 
-    print('\n=== 5. 검색 필터 정확성 ===')
+    print('\n=== 5. Retrieval filter correctness ===')
     retriever = PatentRetriever(client, settings,
                                 {f: encoders[f]['dense'] for f in TEXT_FIELDS},
                                 {f: encoders[f]['sparse'] for f in TEXT_FIELDS})
     try:
         retriever.search_dense('x', None)
-        c.check('필터 없는 검색은 차단됨', False, '예외가 발생하지 않음')
+        c.check('Unfiltered search is blocked', False, 'No exception was raised')
     except ValueError:
-        c.check('필터 없는 검색은 차단됨', True, 'prior_art_filter 필수')
+        c.check('Unfiltered search is blocked', True, 'prior_art_filter is required')
 
     citations = defaultdict(set)
     for r in load_rows('examiner_citation'):
@@ -266,9 +262,9 @@ def main():
     fam_of = {r['patent_id']: r['family_id'] for r in patents}
 
     sample_queries, reasons = pick_boundary_queries(patents, citations)
-    c.info('필터 검증 표본(결정적)', {q: reasons[q] for q in sample_queries})
+    c.info('Deterministic filter verification sample', {q: reasons[q] for q in sample_queries})
 
-    # (a) 필터 자체를 전수 대조: 필터로 걸러진 집합 == CSV로 계산한 후보 풀
+    # (a) Compare complete filtered ID sets against CSV-derived candidate pools.
     set_mismatch = []
     equal_date_included = None
     for qid in sample_queries:
@@ -284,16 +280,16 @@ def main():
             same = [p for p in expected if pub_of[p] == q['app_date']]
             equal_date_included = {'query': qid, 'equal_date_candidates': len(same),
                                    'all_present_in_qdrant_filter': all(p in got for p in same)}
-    c.check('필터 결과 집합이 CSV 기준 후보 풀과 정확히 일치', not set_mismatch,
-            set_mismatch or f'{len(sample_queries)}개 쿼리 전수 대조 통과')
+    c.check('Filtered result set exactly matches the CSV-derived candidate pool', not set_mismatch,
+            set_mismatch or f'{len(sample_queries)} query comparisons passed')
     if equal_date_included:
-        c.check('경계조건: candidate.pub_date == query.app_date 는 포함됨',
+        c.check('Boundary: candidate.pub_date == query.app_date is included',
                 equal_date_included['all_present_in_qdrant_filter']
                 and equal_date_included['equal_date_candidates'] > 0, equal_date_included)
     else:
-        c.info('경계조건(동일 날짜)', '해당 케이스가 데이터에 없어 검증 생략')
+        c.info('Boundary condition (equal date)', 'No corresponding data case; verification skipped')
 
-    # (b) 실제 검색 3종 결과에 필터 위반이 없는지
+    # (b) Check all 3 actual retrieval modes for filter violations.
     for mode, field in (('bm25', 'claims'), ('bm25', 'title_claims'),
                         ('dense', 'claims'), ('dense', 'title_claims'),
                         ('hybrid', 'title_claims')):
@@ -313,20 +309,20 @@ def main():
                 if q['app_date'] and pl.get('pub_date') and pl['pub_date'] > q['app_date']:
                     v['future'] += 1
         violations_summary[f'{mode}/{field}'] = v
-        c.check(f'필터 위반 0건 ({mode}, {field})',
+        c.check(f'Zero filter violations ({mode}, {field})',
                 v['future'] == 0 and v['family'] == 0 and v['self'] == 0, v)
 
-    print('\n  --- 필터 위반 요약 ---')
+    print('\n  --- Filter violation summary ---')
     for k, v in violations_summary.items():
-        print(f'    {k}: future={v["future"]} family={v["family"]} self={v["self"]} (검사한 결과 {v["hits"]}건)')
+        print(f'    {k}: future={v["future"]} family={v["family"]} self={v["self"]} (results checked {v["hits"]})')
 
-    print('\n=== 6. 구조 컬렉션 ===')
+    print('\n=== 6. Structure collection ===')
     try:
         sc = client.count(settings.structures_collection).count
     except Exception as exc:
-        c.check('구조 컬렉션 존재', False, f'{type(exc).__name__}: {exc}')
+        c.check('Structure collection exists', False, f'{type(exc).__name__}: {exc}')
         sc = -1
-    c.check(f'구조 포인트 수 == {EXPECTED_STRUCTURES}', sc == EXPECTED_STRUCTURES, f'실제 {sc}')
+    c.check(f'Structure point count == {EXPECTED_STRUCTURES}', sc == EXPECTED_STRUCTURES, f'actual {sc}')
 
     pairs, dup, contradictions = set(), 0, defaultdict(int)
     tri = {'in_claim': defaultdict(int), 'in_figure': defaultdict(int),
@@ -366,45 +362,45 @@ def main():
             unverified_ev += 1
 
         if in_claim not in (TRUE, FALSE, UNKNOWN):
-            contradictions['in_claim이 3-값이 아님'] += 1
+            contradictions['in_claim is not three-valued'] += 1
         if in_figure not in (TRUE, FALSE, UNKNOWN):
-            contradictions['in_figure가 3-값이 아님'] += 1
+            contradictions['in_figure is not three-valued'] += 1
         if in_claim == TRUE and not ev.get('claim'):
-            contradictions['in_claim=true 인데 근거 없음'] += 1
+            contradictions['in_claim=true without evidence'] += 1
         if in_figure == TRUE and not ev.get('figure'):
-            contradictions['in_figure=true 인데 근거 없음'] += 1
+            contradictions['in_figure=true without evidence'] += 1
         if in_figure == TRUE and not (pl.get('figure_unit_refs') or
                                       any(e.get('fig_id') or e.get('unit_ref') for e in ev.get('figure') or [])):
-            contradictions['in_figure=true 인데 figure 식별자 없음'] += 1
+            contradictions['in_figure=true without figure identifier'] += 1
         if in_claim == FALSE and occ is not None and occ > 0:
-            contradictions['in_claim=false 인데 occurrence>0'] += 1
+            contradictions['in_claim=false with occurrence>0'] += 1
         if in_claim == UNKNOWN and occ is not None:
-            contradictions['in_claim=unknown 인데 occurrence가 null이 아님'] += 1
+            contradictions['in_claim=unknown with non-null occurrence'] += 1
         if occ is not None and ccws is not None and ccws > occ:
             contradictions['claim_count_with_structure > claim_occurrence_count'] += 1
 
-    c.check('구조 포인트 (patent_id, mol_id) 중복 없음', dup == 0, f'중복 {dup}')
-    c.check('구조 포인트 ID가 UUID5 정책과 일치', struct_id_mismatch == 0, f'불일치 {struct_id_mismatch}')
-    c.check('in_claim/in_figure/occurrence 상태-근거 무모순', not contradictions,
-            dict(contradictions) or '모순 0건')
+    c.check('No duplicate structure (patent_id, mol_id) points', dup == 0, f'duplicates {dup}')
+    c.check('Structure point IDs follow UUID5 policy', struct_id_mismatch == 0, f'mismatches {struct_id_mismatch}')
+    c.check('in_claim/in_figure/occurrence states and evidence are consistent', not contradictions,
+            dict(contradictions) or 'Zero contradictions')
     pm_unique = {(r['patent_id'], r['mol_id']) for r in load_rows('patent_molecule')}
-    c.check('구조 포인트 수 == 원본 patent_molecule 고유쌍 수', sc == len(pm_unique), f'{sc} vs {len(pm_unique)}')
-    c.info('in_claim 분포', dict(tri['in_claim']))
-    c.info('in_figure 분포', dict(tri['in_figure']))
-    # --- 특허 단위 보조 필드(db_occurrence_count / figure_exist) 실검증 ---
+    c.check('Structure point count == unique source patent_molecule pairs', sc == len(pm_unique), f'{sc} vs {len(pm_unique)}')
+    c.info('in_claim distribution', dict(tri['in_claim']))
+    c.info('in_figure distribution', dict(tri['in_figure']))
+    # --- Verify patent-level auxiliary fields db_occurrence_count / figure_exist ---
     pm_rows_all = load_rows('patent_molecule')
-    c.check('db_occurrence_count 합계 == patent_molecule 원본 행 수',
+    c.check('Sum of db_occurrence_count == source patent_molecule rows',
             db_occ_missing == 0 and db_occ_sum == len(pm_rows_all),
-            f'합계 {db_occ_sum} vs 원본 {len(pm_rows_all)} (null {db_occ_missing})')
+            f'sum {db_occ_sum} vs source {len(pm_rows_all)} (null {db_occ_missing})')
     fig_csv_pats = {r['patent_id'] for r in load_rows('figure')}
     stray = fig_exist_true_pats - fig_csv_pats
-    c.check('figure_exist=true 특허가 모두 figure.csv에 존재',
-            not stray, f'figure.csv에 없는 특허 {len(stray)}건')
-    c.info('figure_exist 분포', dict(tri['figure_exist']))
-    c.info('figure_exist=true 특허 수', len(fig_exist_true_pats))
-    c.info('claim_occurrence_count 확인 가능/불가', f'{occ_known} / {sc - occ_known}')
-    c.info('claim_count_with_structure 확인 가능', ccws_known)
-    c.info('미검증 figure 근거 보유 포인트', unverified_ev)
+    c.check('All figure_exist=true patents occur in figure.csv',
+            not stray, f'Patents absent from figure.csv: {len(stray)} records')
+    c.info('figure_exist distribution', dict(tri['figure_exist']))
+    c.info('Patents with figure_exist=true', len(fig_exist_true_pats))
+    c.info('claim_occurrence_count known/unknown', f'{occ_known} / {sc - occ_known}')
+    c.info('claim_count_with_structure known', ccws_known)
+    c.info('Points with unverified figure evidence', unverified_ev)
 
     report = {'provenance': prov,
               'counts': {'patents': pc, 'structures': sc},
@@ -415,8 +411,8 @@ def main():
     with open(out, 'w', encoding='utf-8') as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
 
-    print(f'\n=== 결과: 통과 {len(c.passed)} / 실패 {len(c.failed)} ===')
-    print(f'저장됨: {out}')
+    print(f'\n=== Results: passed {len(c.passed)} / failed {len(c.failed)} ===')
+    print(f'Saved: {out}')
     return 1 if c.failed else 0
 
 

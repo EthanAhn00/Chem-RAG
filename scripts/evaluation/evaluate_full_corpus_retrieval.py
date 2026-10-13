@@ -1,30 +1,9 @@
-"""Task 1 전체 코퍼스 검색(full-corpus retrieval) 평가 스크립트.
-
-TARGET 특허 하나당 소수 후보만 놓고 맞는지 확인하던 기존 방식 대신, 쿼리 출원일
-이전에 공개되고 동일 patent family가 아닌 로컬 코퍼스 전체 특허를 후보 풀로 놓고
-실제로 랭킹한다. 즉:
-
-  candidate.pub_date <= query.app_date  AND  candidate.family_id != query.family_id
-
-로컬 코퍼스는 애초에 (target, prior) 인용쌍에서만 뽑힌 특허들이라(한 번도 인용된
-적 없는 배경 특허는 로컬에 없음), 후보 풀은 db_export의 patent_content 전체에서
-위 조건으로 필터링한다. train/test 분리는 결과 표에 참고용으로만 남기고 후보 풀
-구성에는 쓰지 않는다 - 이 파이프라인은 학습을 하지 않는 결정론적 채점 방식이라
-split을 나눌 이유가 없고, 시간 필터가 실질적인 데이터 누출 방지 역할을 한다.
-
-점수는 텍스트 유사도(Jaccard+overlap)와 화학구조 Tanimoto를 rag_engine과 동일한
-공식으로 결합한다(가중치 text=0.5/structure=0.3, vision 없이 재정규화). 특허 하나에
-분자가 여러 개면 모든 SMILES 쌍 중 최댓값을 쓴다. nDCG는 현재 인용 라벨이 전부 X
-등급이라 그레이딩 정보가 없어 이진(binary) 기준으로만 계산한다.
-
-쿼리 x 코퍼스 전수 비교(최대 수백만 쌍)를 감당하기 위해 토큰화/지문 계산은 특허당
-한 번만 미리 해두고 재사용한다.
-
-사용법:
-    python3 scripts/evaluation/evaluate_full_corpus_retrieval.py
-    python3 scripts/evaluation/evaluate_full_corpus_retrieval.py --time-budget-seconds 35   # 여러 번 나눠 이어 돌리기
-    python3 scripts/evaluation/evaluate_full_corpus_retrieval.py --text-weight 0.5 --tanimoto-weight 0.3
-    python3 scripts/evaluation/evaluate_full_corpus_retrieval.py --selftest   # 채점 로직 자체 검증
+"""Task 1 full-corpus retrieval evaluation. Rank all local patents published before query filing and outside the query family, rather than a few paired candidates:
+candidate.pub_date <= query.app_date AND candidate.family_id != query.family_id.
+The corpus itself is citation-pair-derived; unrelated uncited background patents are unavailable. Filter all patent_content records accordingly. Train/test labels provide reporting breakdowns, not candidate-pool selection; scoring is deterministic and untrained, with time filtering providing chronological protection.
+Fuse Jaccard/overlap text and maximum molecule-pair Tanimoto as in rag_engine, weights text=0.5/structure=0.3 renormalized without vision. All current citation categories are X, so nDCG is binary, not graded.
+Precompute tokens/fingerprints once per patent for potentially millions of query-corpus comparisons.
+Usage: python3 scripts/evaluation/evaluate_full_corpus_retrieval.py [--time-budget-seconds 35] [--text-weight 0.5 --tanimoto-weight 0.3] [--selftest]. Time-bounded runs resume; --selftest checks scoring logic.
 """
 import os
 import sys
@@ -56,7 +35,7 @@ def build_indexes():
     molecule_rows = load_csv('molecule')
     patent_molecule_rows = load_csv('patent_molecule')
 
-    split_of = {r['id']: r['split'] for r in split_rows}  # 결과 표시용 참고 정보 - 후보 풀 구성에는 쓰지 않음
+    split_of = {r['id']: r['split'] for r in split_rows}  # Reporting metadata only; not used to build the candidate pool.
     claims_text_of = {r['patent_id']: r['claims_text'] for r in patent_rows}
     pub_date_of = {r['patent_id']: r['pub_date'] for r in patent_rows}
     app_date_of = {r['patent_id']: r['app_date'] for r in patent_rows}
@@ -140,7 +119,7 @@ def max_tanimoto(fps_q, fps_d):
 
 
 def combine_score(text_score, tanimoto_score, text_weight, tanimoto_weight):
-    # rag_engine/multimodal_ranker.py와 동일한 재정규화 방식 - vision 축은 여기선 제외
+    # Renormalize as in rag_engine/multimodal_ranker.py, excluding vision here.
     if tanimoto_score is not None:
         weight_sum = text_weight + tanimoto_weight
         return round((text_weight * text_score + tanimoto_weight * tanimoto_score) / weight_sum, 4)
@@ -148,9 +127,7 @@ def combine_score(text_score, tanimoto_score, text_weight, tanimoto_weight):
 
 
 def build_candidate_pool(query_id, all_patent_ids, pub_date_of, app_date_of, family_id_of):
-    """전체 코퍼스에서 (a) 자기 자신 제외, (b) 쿼리 출원일 이후 공개된 미래 특허 제외,
-    (c) 동일 patent family 제외한 후보 풀을 만든다. YYYYMMDD 문자열은 그대로
-    사전식(lexicographic) 비교해도 날짜 대소 비교와 결과가 같다."""
+    """Build a corpus-wide candidate pool excluding self, publications after query filing, and the same patent family. YYYYMMDD strings support lexicographic date comparison."""
     q_app_date = app_date_of.get(query_id) or ''
     q_family = family_id_of.get(query_id) or ''
 
@@ -176,7 +153,7 @@ def dcg_at_k(relevances, k):
 
 
 def evaluate_query(query_id, ranked_pool, gold_set):
-    # ranked_pool: [(patent_id, score), ...] 내림차순 정렬됨
+    # ranked_pool: [(patent_id, score), ...], sorted descending.
     relevant_ranks = [i for i, (pid, _) in enumerate(ranked_pool) if pid in gold_set]
     if not relevant_ranks:
         return None
@@ -188,8 +165,8 @@ def evaluate_query(query_id, ranked_pool, gold_set):
     for rank in relevant_ranks:
         hit_count += 1
         precisions.append(hit_count / (rank + 1))
-    # AP 정의: 회수된 relevant 수가 아니라 '전체 정답 수'로 나눈다.
-    # 랭킹에 나타나지 않은 정답은 0 기여로 반영되어야 하기 때문(표준 Average Precision).
+    # AP divides by all gold documents, not only retrieved relevant documents.
+    # Unretrieved gold contributes zero, following standard Average Precision.
     ap = sum(precisions) / num_relevant
 
     r_at_100 = sum(1 for r in relevant_ranks if r < 100) / num_relevant
@@ -216,66 +193,65 @@ def evaluate_query(query_id, ranked_pool, gold_set):
 
 
 def run_selftest():
-    """채점 로직(pool 필터링 + AP/Recall/MRR/nDCG)에 대한 최소 단위 테스트.
-    외부 데이터 없이 합성 데이터로 검증하며, 실패 시 AssertionError로 즉시 중단된다."""
-    print('[selftest] 후보 풀 필터링(시간/패밀리) 검증...')
+    """Minimal synthetic checks for pool filters and AP/Recall/MRR/nDCG without external data. AssertionError stops immediately on failure."""
+    print('[selftest] Checking time/family candidate filters...')
     pub_date_of = {'Q': '20200101', 'A': '20190101', 'B': '20200601', 'C': '20191201', 'D': '20191001'}
     app_date_of = {'Q': '20200101'}
     family_id_of = {'Q': 'FAM1', 'A': 'FAM2', 'B': 'FAM2', 'C': 'FAM1', 'D': 'FAM3'}
     all_ids = ['Q', 'A', 'B', 'C', 'D']
     pool, excl_future, excl_family = build_candidate_pool('Q', all_ids, pub_date_of, app_date_of, family_id_of)
-    # B는 쿼리 출원일(20200101) 이후 공개(20200601)라 제외돼야 함
-    # C는 쿼리와 동일 family(FAM1)라 제외돼야 함
-    # A, D만 남아야 함
-    assert set(pool) == {'A', 'D'}, f'예상과 다른 후보 풀: {pool}'
-    assert excl_future == 1 and excl_family == 1, f'제외 카운트 불일치: future={excl_future}, family={excl_family}'
-    print('  OK - 미래 특허 1건, 동일 패밀리 1건이 정확히 제외됨')
+    # Exclude B, published 20200601 after query filing on 20200101.
+    # Exclude C, sharing the query family FAM1.
+    # Only A and D should remain.
+    assert set(pool) == {'A', 'D'}, f'Unexpected candidate pool: {pool}'
+    assert excl_future == 1 and excl_family == 1, f'Exclusion count mismatch: future={excl_future}, family={excl_family}'
+    print('  OK - exactly 1 future patent and 1 same-family patent excluded')
 
-    print('[selftest] AP/Recall/MRR/nDCG 계산 검증...')
-    # 정답 2개(P2, P5)가 각각 2위, 5위인 랭킹
+    print('[selftest] Checking AP/Recall/MRR/nDCG calculations...')
+    # Gold P2/P5 at ranks 2/5.
     ranked = [(f'P{i}', 1.0 - i * 0.01) for i in range(1, 11)]
     gold = {'P2', 'P5'}
     result = evaluate_query('Q', ranked, gold)
-    # AP = ((1/2) + (2/5)) / 2 = 0.45  (정답 2개 모두 회수된 경우)
-    assert abs(result['ap'] - 0.45) < 1e-6, f"AP 계산 오류: {result['ap']}"
+    # AP = ((1/2) + (2/5)) / 2 = 0.45 when both gold documents are retrieved.
+    assert abs(result['ap'] - 0.45) < 1e-6, f"AP calculation error: {result['ap']}"
 
-    # 부분 회수: 정답 2개 중 1개만 1위로 회수 -> AP = (1/1) / 2 = 0.5
+    # Partial retrieval: 1 of 2 gold documents at rank 1 -> AP = (1/1) / 2 = 0.5.
     partial = evaluate_query('Q', [('P2', 1.0)], {'P2', 'P5'})
-    assert abs(partial['ap'] - 0.5) < 1e-6, f"부분 회수 AP 오류: {partial['ap']}"
+    assert abs(partial['ap'] - 0.5) < 1e-6, f"Partial-retrieval AP error: {partial['ap']}"
     assert result['recall_at_100'] == 1.0
-    # MRR@10: 첫 정답이 2위 -> 1/2
-    assert abs(result['mrr_at_10'] - 0.5) < 1e-6, f"MRR 계산 오류: {result['mrr_at_10']}"
+    # MRR@10: first gold at rank 2 -> 1/2.
+    assert abs(result['mrr_at_10'] - 0.5) < 1e-6, f"MRR calculation error: {result['mrr_at_10']}"
     assert result['best_rank'] == 2
     print(f'  OK - AP={result["ap"]}, MRR@10={result["mrr_at_10"]}, nDCG@10={result["ndcg_at_10_binary"]}')
 
-    print('[selftest] 정답이 풀에 없는 쿼리는 None 반환 검증...')
+    print('[selftest] Checking None for queries with no gold in the pool...')
     result_none = evaluate_query('Q', ranked, {'NOT_IN_POOL'})
     assert result_none is None
     print('  OK')
 
-    print('[selftest] 중단 후 재개(resume) 시 제외 통계·소요시간 집계 검증...')
-    # 시간 예산을 넘겨 여러 번 나눠 실행해도, 제외 통계/소요시간이 마지막 청크가
-    # 아니라 전체 청크 기준으로 정확히 합산되는지 확인한다.
+    print('[selftest] Checking exclusion statistics and elapsed time across resumed runs...')
+    # Time-bounded runs must aggregate exclusion statistics and elapsed time
+    # across all chunks, not just the final chunk.
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         partial_path = os.path.join(tmp, 'fake.partial.jsonl')
         meta_path = partial_path + '.meta.json'
 
-        # 1번째 청크: 미래 제외 10건짜리 쿼리 하나 기록, 누적시간 5.0초로 중단
+        # Chunk 1: one query with 10 future exclusions; stop at cumulative 5.0 seconds.
         with open(partial_path, 'w', encoding='utf-8') as f:
             f.write(json.dumps({'query_id': 'Q1', 'ap': 1.0, 'candidates_excluded_future': 10,
                                  'candidates_excluded_same_family': 2}) + '\n')
         with open(meta_path, 'w', encoding='utf-8') as f:
             json.dump({'cumulative_elapsed_seconds': 5.0}, f)
 
-        # 2번째 청크: 미래 제외 0건짜리 쿼리 하나 추가 기록 (main()의 재개 로직과
-        # 동일하게 - 이전 결과를 읽고, 이번 실행분만 새로 append)
+        # Chunk 2: append one query with 0 future exclusions, matching main() resume:
+        # read previous results and append only this run's work.
         with open(partial_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps({'query_id': 'Q2', 'ap': 0.0, 'candidates_excluded_future': 0,
                                  'candidates_excluded_same_family': 0}) + '\n')
-        this_run_elapsed = 3.0  # 가정: 2번째 청크가 3초 걸림
+        this_run_elapsed = 3.0  # Assume chunk 2 takes 3 seconds.
 
-        # main()이 최종 집계 시 하는 것과 동일한 절차
+        # Use the same final aggregation procedure as main().
         per_query_results = []
         with open(partial_path, 'r', encoding='utf-8') as f:
             for line in f:
@@ -285,35 +261,35 @@ def run_selftest():
         cumulative_elapsed = cumulative_before + this_run_elapsed
 
         avg_future = sum(r['candidates_excluded_future'] for r in per_query_results) / len(per_query_results)
-        assert avg_future == 5.0, f'재개 시 제외 통계가 전체 평균이 아님: {avg_future}'
-        assert cumulative_elapsed == 8.0, f'재개 시 누적 소요시간이 틀림: {cumulative_elapsed}'
-    print('  OK - 재개 시에도 전체 청크 기준으로 정확히 집계됨(avg_future=5.0, elapsed=8.0)')
+        assert avg_future == 5.0, f'Resumed exclusion statistics are not the overall mean: {avg_future}'
+        assert cumulative_elapsed == 8.0, f'Incorrect cumulative elapsed time after resume: {cumulative_elapsed}'
+    print('  OK - all chunks aggregated correctly on resume (avg_future=5.0, elapsed=8.0)')
 
-    print('\n[selftest] 전체 통과')
+    print('\n[selftest] All checks passed')
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--query-split', choices=['train', 'test', 'all'], default='all',
-                         help='결과를 어느 쿼리 집합 기준으로 볼지(참고용 메타데이터일 뿐, 후보 풀은 항상 전체 코퍼스)')
+                         help='Query subset for reporting only; candidate pool always uses the entire corpus')
     parser.add_argument('--text-weight', type=float, default=0.5)
     parser.add_argument('--tanimoto-weight', type=float, default=0.3,
-                         help='rag_engine/multimodal_ranker.py 기본값(text=0.5/structure=0.3/vision=0.2)과 '
-                              '같은 비율이 되도록 기본값을 0.3으로 맞춤(vision 제외 후 재정규화하면 0.625:0.375)')
+                         help='Match rag_engine/multimodal_ranker.py defaults (text=0.5/structure=0.3/vision=0.2); '
+                              'structure defaults to 0.3, giving 0.625:0.375 after excluding vision and renormalizing')
     parser.add_argument('--limit-queries', type=int, default=None,
-                         help='디버그용 - 쿼리 수 상한(전체 실행 전 소규모 테스트)')
+                         help='Debug query limit for a small trial before a full run')
     parser.add_argument('--time-budget-seconds', type=float, default=None,
-                         help='이 시간(초)이 지나면 처리 중이던 쿼리까지만 끝내고 중간 저장 후 종료 - '
-                              '전체 코퍼스라 오래 걸리는 실행을 여러 번 나눠 돌려 이어갈 때 사용. '
-                              '완료된 쿼리는 <out>.partial.jsonl에 누적되고, 다음 실행 시 자동으로 건너뜀')
-    parser.add_argument('--selftest', action='store_true', help='합성 데이터로 채점 로직만 검증하고 종료')
+                         help='After this many seconds, finish the current query, save intermediate results, and stop; '
+                              'split lengthy full-corpus runs into resumable chunks. '
+                              'Completed queries accumulate in <out>.partial.jsonl and are skipped on resume')
+    parser.add_argument('--selftest', action='store_true', help='Check scoring logic on synthetic data and exit')
     args = parser.parse_args()
 
     if args.selftest:
         run_selftest()
         return
 
-    print('[1/5] db_export 테이블 로딩...')
+    print('[1/5] Loading db_export tables...')
     idx = build_indexes()
     all_patent_ids = idx['all_patent_ids']
 
@@ -322,25 +298,25 @@ def main():
         query_ids = [pid for pid in query_ids if idx['split_of'].get(pid) == args.query_split]
     if args.limit_queries:
         query_ids = query_ids[:args.limit_queries]
-    print(f'  전체 코퍼스 {len(all_patent_ids)}건, 평가 대상 쿼리(정답 보유, query-split={args.query_split}) {len(query_ids)}건')
+    print(f'  Full corpus: {len(all_patent_ids)}; eligible gold-bearing queries (query-split={args.query_split}) {len(query_ids)} records')
 
-    print('[2/5] 텍스트 토큰 사전계산...')
+    print('[2/5] Precomputing text tokens...')
     tokenizer = ChemicalTokenizer()
     token_counters = precompute_token_counters(all_patent_ids, idx['claims_text_of'], tokenizer)
     empty_text = sum(1 for pid in all_patent_ids if token_counters[pid][1] == 0)
     empty_text_in_queries = sum(1 for pid in query_ids if token_counters[pid][1] == 0)
-    print(f'  claims_text 비어있어 토큰 0개인 특허: 전체 {empty_text}건, 쿼리 중 {empty_text_in_queries}건')
+    print(f'  Patents with empty claims_text and zero tokens: total {empty_text}; among queries {empty_text_in_queries} records')
 
-    print('[3/5] 화학구조 Morgan fingerprint 사전계산...')
+    print('[3/5] Precomputing chemical Morgan fingerprints...')
     fps_of = precompute_fingerprints(all_patent_ids, idx['smiles_of'])
     with_structure = sum(1 for pid in all_patent_ids if fps_of[pid])
-    print(f'  구조(SMILES) 확보된 특허: {with_structure}/{len(all_patent_ids)}')
+    print(f'  Patents with SMILES: {with_structure}/{len(all_patent_ids)}')
 
     out_dir = os.path.normpath(os.path.join(DATA_DIR, '..', 'benchmark', 'results'))
     os.makedirs(out_dir, exist_ok=True)
     partial_path = os.path.join(out_dir, f'full_corpus_retrieval_v2_{args.query_split}.partial.jsonl')
-    # 청크별 소요시간을 이어서 더하기 위한 보조 메타 파일. 제외 통계는 per-query
-    # 결과 자체에 저장되므로 별도 누적 카운터 없이 나중에 agg()로 평균낸다.
+    # Auxiliary metadata accumulates elapsed time across chunks. Per-query results
+    # already store exclusions; agg() computes means without extra counters.
     meta_path = partial_path + '.meta.json'
 
     done_ids = set()
@@ -355,13 +331,13 @@ def main():
                 rec = json.loads(line)
                 per_query_results.append(rec)
                 done_ids.add(rec['query_id'])
-        print(f'  이전 실행에서 완료된 쿼리 {len(done_ids)}건을 이어서 진행합니다 ({partial_path})')
+        print(f'  Resuming completed queries from previous runs: {len(done_ids)} ({partial_path})')
         if os.path.exists(meta_path):
             with open(meta_path, 'r', encoding='utf-8') as f:
                 cumulative_elapsed_before_this_run = json.load(f).get('cumulative_elapsed_seconds', 0.0)
 
     remaining_query_ids = [q for q in query_ids if q not in done_ids]
-    print(f'[4/5] 쿼리별 전체 코퍼스(시간/패밀리 필터 적용) 랭킹 계산 중... (남은 쿼리 {len(remaining_query_ids)})')
+    print(f'[4/5] Ranking the time/family-filtered corpus per query... (queries remaining {len(remaining_query_ids)})')
     t0 = time.time()
     excluded_gold_not_in_pool = 0
     partial_f = open(partial_path, 'a', encoding='utf-8')
@@ -406,7 +382,7 @@ def main():
 
             if processed_this_run % 20 == 0:
                 elapsed = time.time() - t0
-                print(f'  이번 실행에서 {processed_this_run}/{len(remaining_query_ids)}건 처리 ({elapsed:.1f}초 경과)')
+                print(f'  This run processed {processed_this_run}/{len(remaining_query_ids)} ({elapsed:.1f} seconds elapsed)')
     finally:
         partial_f.close()
 
@@ -417,22 +393,22 @@ def main():
         with open(meta_path, 'w', encoding='utf-8') as f:
             json.dump({'cumulative_elapsed_seconds': round(cumulative_elapsed, 1)}, f)
         done_now = len(per_query_results)
-        print(f'\n[시간 예산 도달] 이번 실행에서 {processed_this_run}건 처리 ({this_run_elapsed:.1f}초), '
-              f'누적 완료 {done_now}건, 누적 소요시간 {cumulative_elapsed:.1f}초. '
-              f'같은 명령을 다시 실행하면 이어서 진행됩니다.')
+        print(f'\n[TIME BUDGET REACHED] This run processed {processed_this_run} ({this_run_elapsed:.1f} seconds), '
+              f'completed cumulatively: {done_now}; cumulative elapsed time {cumulative_elapsed:.1f} seconds. '
+              f'Run the same command again to resume.')
         return
 
-    print('[5/5] 결과 집계...')
+    print('[5/5] Aggregating results...')
     n = len(per_query_results)
     if n == 0:
-        print('평가 가능한 쿼리가 없습니다(정답이 코퍼스 풀 안에 하나도 없음).')
+        print('No evaluable queries: no gold documents are present in the corpus pool.')
         return
 
     def agg(key, records):
         return round(sum(r[key] for r in records) / len(records), 4) if records else None
 
     summary = {
-        'candidate_pool_definition': 'patent_content 전체(4,123건) - 자기 자신 - candidate.pub_date > query.app_date - 동일 family_id',
+        'candidate_pool_definition': 'All patent_content (4,123 records), excluding self, candidate.pub_date > query.app_date, and matching family_id',
         'query_split_filter': args.query_split,
         'candidate_queries_with_gold_label': len(query_ids),
         'excluded_gold_not_in_pool': excluded_gold_not_in_pool,
@@ -440,7 +416,7 @@ def main():
         'text_weight': args.text_weight,
         'tanimoto_weight': args.tanimoto_weight,
         'vision_included': False,
-        'ndcg_note': 'ndcg_at_10_binary는 이진 relevance 기준 - examiner_citation.category가 전부 X 계열이라 등급(X/Y/A) 반영 nDCG는 아직 계산 불가',
+        'ndcg_note': 'ndcg_at_10_binary uses binary relevance; examiner_citation.category contains only X variants, so graded X/Y/A nDCG is unavailable',
         'structure_multi_molecule_policy': 'max_tanimoto_over_all_smiles_pairs',
         'avg_pool_size': agg('pool_size', per_query_results),
         'avg_candidates_excluded_future_per_query': agg('candidates_excluded_future', per_query_results),
@@ -453,10 +429,10 @@ def main():
         'recall_at_1000': agg('recall_at_1000', per_query_results),
         'mrr_at_10': agg('mrr_at_10', per_query_results),
         'ndcg_at_10_binary': agg('ndcg_at_10_binary', per_query_results),
-        'elapsed_seconds': round(cumulative_elapsed, 1),  # 여러 청크로 나눠 돌렸으면 전체 합산 시간
+        'elapsed_seconds': round(cumulative_elapsed, 1),  # Sum elapsed time over all chunks.
     }
 
-    # 참고용 - 쿼리의 원래 split 라벨별 breakdown (후보 풀은 동일하게 전체 코퍼스 기준)
+    # Original query split labels provide reporting breakdowns; the corpus pool stays identical.
     by_split = defaultdict(list)
     for r in per_query_results:
         by_split[r.get('original_split_label') or 'unknown'].append(r)
@@ -477,14 +453,14 @@ def main():
     out_path = os.path.join(out_dir, f'full_corpus_retrieval_v2_{args.query_split}.json')
     with open(out_path, 'w', encoding='utf-8') as f:
         json.dump({'summary': summary, 'per_query': per_query_results}, f, ensure_ascii=False, indent=2)
-    print(f'\n저장됨: {out_path}')
+    print(f'\nSaved: {out_path}')
 
     for tmp_path in (partial_path, meta_path):
         if os.path.exists(tmp_path):
             try:
                 os.remove(tmp_path)
             except OSError:
-                print(f'(참고: {tmp_path} 자동 삭제 실패 - 수동으로 지워도 되고 안 지워도 다음 실행에 영향 없음)')
+                print(f'(Note: {tmp_path} automatic deletion failed; manual removal is optional and does not affect the next run)')
 
 
 if __name__ == '__main__':

@@ -1,4 +1,4 @@
-"""입력 CSV의 버전(내용 해시) 추적 - payload의 source_version 값 생성."""
+"""Track input CSV content hashes to generate payload source_version."""
 import hashlib
 import os
 
@@ -15,10 +15,7 @@ def file_digest(path, chunk=1024 * 1024):
 
 
 def source_version(paths):
-    """여러 소스 파일의 내용 해시를 합쳐 하나의 짧은 버전 문자열로 만든다.
-
-    파일 내용이 바뀌면 값이 바뀌므로, 재색인이 필요한지 payload만 보고 알 수 있다.
-    """
+    """Combine multiple source-file content hashes into one short version string. Changes reveal reindexing needs from payload provenance."""
     combined = hashlib.sha256()
     detail = {}
     for p in sorted(paths):
@@ -33,7 +30,7 @@ def source_version(paths):
 
 
 def runtime_provenance(settings=None, command=None):
-    """결과 파일에 남길 실행 환경 정보(재현성 추적용)."""
+    """Execution-environment metadata for reproducibility in result files."""
     import sys
     import time
     import platform
